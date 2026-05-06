@@ -1,0 +1,22 @@
+{
+  "selected_template": "demande_honneur",
+  "entreprise": {
+    "raison_sociale": "BIO ARTISAN SARL",
+    "rc": "12345",
+    "ice": "002"
+  },
+  "dirigeant": {
+    "nom": "Mohamed",
+    "cin": "XX123",
+    "qualite": "Gérant"
+  },
+  "dossier": {
+    "lieu_signature": "Agadir",
+    "date_signature": "06/05/2026",
+    "identifiant": "TEST"
+  },
+  "projet": {
+    "objet": "Unité d’abattage et découpe de volailles",
+    "investissement_total": 10250000
+  }
+}

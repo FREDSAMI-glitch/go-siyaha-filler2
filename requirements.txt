@@ -1,0 +1,4 @@
+fastapi
+python-multipart
+docxtpl
+openpyxl
