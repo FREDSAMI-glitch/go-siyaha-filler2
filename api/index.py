@@ -50,9 +50,9 @@ async def fill(request: Request):
             "banque": data.get("banque", {}),
         }
 
-        template_path = TEMPLATE_DIR / "declaration_factures.docx"
-        if not template_path.exists():
-            return JSONResponse(status_code=404, content={"error": "Template declaration_factures.docx introuvable"})
+        template_path = BASE_DIR / "declaration_factures.docx"
+if not template_path.exists():
+    return JSONResponse(status_code=404, content={"error": "declaration_factures.docx introuvable à la racine"})
 
         identifiant = safe_name(dossier.get("identifiant", "DOSSIER"))
         societe = safe_name(entreprise.get("raison_sociale", "SOCIETE"))
