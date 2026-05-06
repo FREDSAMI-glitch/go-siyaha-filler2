@@ -5,12 +5,11 @@ from pathlib import Path
 import tempfile
 import zipfile
 import uuid
-import os
 
 app = FastAPI()
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-TEMPLATE_DIR = BASE_DIR / "templates"
+API_DIR = Path(__file__).resolve().parent
+BASE_DIR = API_DIR.parent
 
 
 def safe_name(value):
@@ -21,7 +20,7 @@ def safe_name(value):
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "go-siyaha-filler"}
+    return {"status": "ok", "message": "GO SIYAHA filler API"}
 
 
 @app.get("/health")
@@ -40,29 +39,39 @@ async def fill(request: Request):
         dirigeant = data.get("dirigeant", {})
         projet = data.get("projet", {})
 
+        possible_paths = [
+            API_DIR / "declaration_factures.docx",
+            BASE_DIR / "declaration_factures.docx",
+            BASE_DIR / "templates" / "declaration_factures.docx",
+            API_DIR / "templates" / "declaration_factures.docx",
+        ]
+
+        template_path = None
+        for path in possible_paths:
+            if path.exists():
+                template_path = path
+                break
+
+        if template_path is None:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": "declaration_factures.docx introuvable",
+                    "checked_paths": [str(p) for p in possible_paths]
+                }
+            )
+
         context = {
             "dossier": dossier,
             "entreprise": entreprise,
             "dirigeant": dirigeant,
-            "projet": projet,
-            "investissements": data.get("investissements", []),
-            "emplois": data.get("emplois", {}),
-            "banque": data.get("banque", {}),
+            "projet": projet
         }
-
-      API_DIR = Path(__file__).resolve().parent
-
-template_path = API_DIR / "declaration_factures.docx"
-if not template_path.exists():
-    return JSONResponse(
-        status_code=404,
-        content={"error": f"declaration_factures.docx introuvable dans api. Chemin testé: {template_path}"}
-    )
 
         identifiant = safe_name(dossier.get("identifiant", "DOSSIER"))
         societe = safe_name(entreprise.get("raison_sociale", "SOCIETE"))
-        job_id = str(uuid.uuid4())
 
+        job_id = str(uuid.uuid4())
         tmp_dir = Path(tempfile.gettempdir()) / f"go_siyaha_{job_id}"
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
