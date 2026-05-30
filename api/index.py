@@ -3,6 +3,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from docxtpl import DocxTemplate
 from openpyxl import load_workbook
 from pathlib import Path
+from jinja2 import Environment, ChainableUndefined
 import tempfile
 import zipfile
 import uuid
@@ -12,16 +13,37 @@ import re
 app = FastAPI()
 
 API_DIR = Path(__file__).resolve().parent
-BASE_DIR = API_DIR.parent
+
+# Fonction robuste : marche si index.py est dans /api ou à la racine
+POSSIBLE_BASE_DIRS = [
+    API_DIR,
+    API_DIR.parent,
+]
+
+BASE_DIR = None
+for d in POSSIBLE_BASE_DIRS:
+    if (d / "templates").exists() or (d / "mappings").exists():
+        BASE_DIR = d
+        break
+
+if BASE_DIR is None:
+    BASE_DIR = API_DIR.parent
 
 TEMPLATE_DIR = BASE_DIR / "templates"
 MAPPING_DIR = BASE_DIR / "mappings"
+
+# Jinja sécurisé : si une variable manque dans un Word, elle devient vide au lieu de bloquer l'API
+DOCX_JINJA_ENV = Environment(undefined=ChainableUndefined)
 
 
 def safe_name(value):
     if not value:
         return "DOSSIER"
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in str(value))
+
+
+def as_dict(value):
+    return value if isinstance(value, dict) else {}
 
 
 def deep_get(data, path, default=""):
@@ -69,12 +91,183 @@ def normalize_value(value, value_type="text"):
     return value if value is not None else ""
 
 
+def add_docx_defaults(context):
+    """
+    Évite les erreurs docxtpl/Jinja du type :
+    'dict object' has no attribute 'attestation_classement'
+
+    Les champs absents deviennent vides.
+    """
+    context.setdefault("dossier", {})
+    context.setdefault("entreprise", {})
+    context.setdefault("dirigeant", {})
+    context.setdefault("projet", {})
+    context.setdefault("banque", {})
+    context.setdefault("emplois", {})
+    context.setdefault("investissements", {})
+    context.setdefault("financement_pi", {})
+    context.setdefault("financement_expert", {})
+    context.setdefault("hypotheses_financieres", {})
+
+    context["dossier"] = as_dict(context.get("dossier"))
+    context["entreprise"] = as_dict(context.get("entreprise"))
+    context["dirigeant"] = as_dict(context.get("dirigeant"))
+    context["projet"] = as_dict(context.get("projet"))
+    context["banque"] = as_dict(context.get("banque"))
+    context["emplois"] = as_dict(context.get("emplois"))
+    context["financement_pi"] = as_dict(context.get("financement_pi"))
+    context["financement_expert"] = as_dict(context.get("financement_expert"))
+    context["hypotheses_financieres"] = as_dict(context.get("hypotheses_financieres"))
+
+    common_defaults = {
+        "identifiant": "",
+        "date_dossier": "",
+        "lieu_signature": "",
+        "date_signature": "",
+        "numero_dossier": "",
+        "programme": "GO SIYAHA",
+        "appel_a_manifestation": "",
+
+        "raison_sociale": "",
+        "denomination": "",
+        "forme_juridique": "",
+        "date_creation": "",
+        "rc": "",
+        "numero_rc": "",
+        "ice": "",
+        "cnss": "",
+        "identifiant_fiscal": "",
+        "patente": "",
+        "adresse_siege": "",
+        "adresse": "",
+        "telephone": "",
+        "tel": "",
+        "email": "",
+        "capital_social": "",
+        "capital_social_mad": 0,
+        "activite": "",
+        "activite_detaillee": "",
+        "objet_social": "",
+        "attestation_classement": "",
+        "classement": "",
+        "categorie_classement": "",
+
+        "nom": "",
+        "prenom": "",
+        "cin": "",
+        "qualite": "",
+        "fonction": "",
+        "mobile": "",
+        "gsm": "",
+
+        "objet": "",
+        "description": "",
+        "ville_region": "",
+        "region": "",
+        "province": "",
+        "commune": "",
+        "lieu_realisation": "",
+        "coordonnees_gps": "",
+        "latitude": "",
+        "longitude": "",
+        "branche_activite": "",
+        "secteur": "",
+        "biens_services_produits": "",
+        "investissement_total": 0,
+        "investissement_total_mad": 0,
+        "mode_financement_detail": "",
+        "surface_terrain": "",
+        "nature_terrain": "",
+        "titre_foncier": "",
+        "statut_foncier": "",
+        "planning_realisation": "",
+        "date_demarrage_prevue": "",
+        "annee_demarrage": "",
+        "role_region": "",
+        "role_balance_commerciale": "",
+        "substitution_importations": "",
+        "developpement_export": "",
+
+        "banque_partenaire": "",
+        "banque": "",
+        "fonds_propres": 0,
+        "credit_bancaire": 0,
+        "cmt": 0,
+        "leasing": 0,
+        "credit_fournisseur": 0,
+        "prime": 0,
+        "prime_istitmar": 0,
+        "montant_prime": 0,
+        "apport_fonds_propres": 0,
+        "part_fonds_propres": 0,
+        "mode_financement": "",
+
+        "emplois_directs": "",
+        "emplois_indirects": "",
+        "emplois_stables": "",
+        "effectif": "",
+        "ca_prevu_annee_1": 0,
+        "croissance_ca": 0,
+    }
+
+    for key, value in common_defaults.items():
+        context.setdefault(key, value)
+
+    for section in [
+        "dossier",
+        "entreprise",
+        "dirigeant",
+        "projet",
+        "banque",
+        "emplois",
+        "financement_pi",
+        "financement_expert",
+        "hypotheses_financieres",
+    ]:
+        for key, value in common_defaults.items():
+            context[section].setdefault(key, value)
+
+    context["entreprise"].setdefault("numero_rc", context["entreprise"].get("rc", ""))
+    context["entreprise"].setdefault("denomination", context["entreprise"].get("raison_sociale", ""))
+    context["entreprise"].setdefault("adresse", context["entreprise"].get("adresse_siege", ""))
+    context["dirigeant"].setdefault("fonction", context["dirigeant"].get("qualite", ""))
+    context["dirigeant"].setdefault("gsm", context["dirigeant"].get("mobile", ""))
+    context["projet"].setdefault("description", context["projet"].get("objet", ""))
+    context["projet"].setdefault("investissement_total_mad", context["projet"].get("investissement_total", 0))
+    context["banque"].setdefault("banque_partenaire", context["banque"].get("nom", ""))
+
+    return context
+
+
+def write_cell(ws, cell_ref, value, value_type="text"):
+    cell = ws[cell_ref]
+
+    # Ne jamais écraser une formule Excel
+    if isinstance(cell.value, str) and cell.value.startswith("="):
+        return
+
+    cell.value = normalize_value(value, value_type)
+
+
+def apply_simple_mappings(wb, context, mappings):
+    for item in mappings:
+        sheet_name = item.get("sheet")
+        cell_ref = item.get("cell")
+        field = item.get("field")
+        value_type = item.get("type", "text")
+
+        if not sheet_name or not cell_ref or not field:
+            continue
+
+        if sheet_name not in wb.sheetnames:
+            continue
+
+        ws = wb[sheet_name]
+        value = deep_get(context, field, "")
+        write_cell(ws, cell_ref, value, value_type)
+
+
 def normalize_investissements(data):
-    """
-    Accepte deux formats :
-    1) investissements = { "terrain": [...], "constructions": [...] }
-    2) investissements = [ {"categorie": "terrain", ...}, ... ]
-    """
     investissements = data.get("investissements", {})
 
     if isinstance(investissements, dict):
@@ -86,7 +279,7 @@ def normalize_investissements(data):
         "amenagement_agencement": [],
         "materiel_equipement": [],
         "frais_preliminaires": [],
-        "divers_imprevus": []
+        "divers_imprevus": [],
     }
 
     if isinstance(investissements, list):
@@ -119,34 +312,6 @@ def normalize_investissements(data):
     return result
 
 
-def write_cell(ws, cell_ref, value, value_type="text"):
-    cell = ws[cell_ref]
-
-    # Ne jamais écraser les formules
-    if isinstance(cell.value, str) and cell.value.startswith("="):
-        return
-
-    cell.value = normalize_value(value, value_type)
-
-
-def apply_simple_mappings(wb, context, mappings):
-    for item in mappings:
-        sheet_name = item.get("sheet")
-        cell_ref = item.get("cell")
-        field = item.get("field")
-        value_type = item.get("type", "text")
-
-        if not sheet_name or not cell_ref or not field:
-            continue
-
-        if sheet_name not in wb.sheetnames:
-            continue
-
-        ws = wb[sheet_name]
-        value = deep_get(context, field, "")
-        write_cell(ws, cell_ref, value, value_type)
-
-
 def apply_table_mappings(wb, context, table_mappings):
     investissements = normalize_investissements(context)
 
@@ -165,7 +330,6 @@ def apply_table_mappings(wb, context, table_mappings):
 
         ws = wb[sheet_name]
 
-        # source_array exemple : investissements.terrain
         source_key = source_array.split(".")[-1]
         rows = investissements.get(source_key, [])
 
@@ -187,14 +351,7 @@ def apply_table_mappings(wb, context, table_mappings):
                     continue
 
                 cell_ref = f"{column_letter}{excel_row}"
-
                 value = row_data.get(field, default_value)
-
-                # TVA par défaut par catégorie
-                if field == "taux_tva" and (value is None or value == ""):
-                    default_by_category = col.get("default_by_category", {})
-                    category = table.get("category", "default")
-                    value = default_by_category.get(category, default_by_category.get("default", 0))
 
                 write_cell(ws, cell_ref, value, value_type)
 
@@ -205,8 +362,10 @@ def render_docx(template_name, output_path, context):
     if not template_path.exists():
         raise FileNotFoundError(f"Template Word introuvable : {template_name}")
 
+    safe_context = add_docx_defaults(dict(context))
+
     doc = DocxTemplate(str(template_path))
-    doc.render(context)
+    doc.render(safe_context, jinja_env=DOCX_JINJA_ENV)
     doc.save(str(output_path))
 
 
@@ -225,7 +384,6 @@ def render_bp_excel(output_path, context):
 
     wb = load_workbook(template_path)
 
-    # Mapping structuré
     apply_simple_mappings(wb, context, mapping.get("scalar_mappings", []))
     apply_simple_mappings(wb, context, mapping.get("financement_pi_mappings", []))
     apply_table_mappings(wb, context, mapping.get("table_mappings", []))
@@ -233,7 +391,7 @@ def render_bp_excel(output_path, context):
     apply_simple_mappings(wb, context, mapping.get("bilan_mappings", []))
     apply_simple_mappings(wb, context, mapping.get("impacts_mappings", []))
 
-    # Forcer Excel à recalculer à l'ouverture
+    # Excel recalculera les formules à l’ouverture
     wb.calculation.fullCalcOnLoad = True
     wb.calculation.forceFullCalc = True
 
@@ -245,8 +403,9 @@ def root():
     return {
         "status": "ok",
         "message": "GO SIYAHA filler API",
+        "base_dir": str(BASE_DIR),
         "templates_dir": str(TEMPLATE_DIR),
-        "mappings_dir": str(MAPPING_DIR)
+        "mappings_dir": str(MAPPING_DIR),
     }
 
 
@@ -254,16 +413,17 @@ def root():
 def health():
     return {
         "status": "ok",
+        "base_dir": str(BASE_DIR),
         "templates": {
             "declaration_factures.docx": (TEMPLATE_DIR / "declaration_factures.docx").exists(),
             "DAP_template.docx": (TEMPLATE_DIR / "DAP_template.docx").exists(),
             "BP_template.xlsx": (TEMPLATE_DIR / "BP_template.xlsx").exists(),
             "demande_honneur.docx": (TEMPLATE_DIR / "demande_honneur.docx").exists(),
-            "engagement_capacite.docx": (TEMPLATE_DIR / "engagement_capacite.docx").exists()
+            "engagement_capacite.docx": (TEMPLATE_DIR / "engagement_capacite.docx").exists(),
         },
         "mappings": {
-            "mapping_bp_istitmar.json": (MAPPING_DIR / "mapping_bp_istitmar.json").exists()
-        }
+            "mapping_bp_istitmar.json": (MAPPING_DIR / "mapping_bp_istitmar.json").exists(),
+        },
     }
 
 
@@ -297,8 +457,10 @@ async def fill(request: Request):
             "impacts_historique": data.get("impacts_historique", {}),
             "impacts_previsionnels": data.get("impacts_previsionnels", {}),
             "hypotheses_financieres": data.get("hypotheses_financieres", {}),
-            "financement_expert": data.get("financement_expert", {})
+            "financement_expert": data.get("financement_expert", {}),
         }
+
+        context = add_docx_defaults(context)
 
         dossier = context["dossier"]
         entreprise = context["entreprise"]
@@ -363,15 +525,15 @@ async def fill(request: Request):
                         "dap_word",
                         "demande_honneur",
                         "engagement_capacite",
-                        "dossier_complet"
-                    ]
-                }
+                        "dossier_complet",
+                    ],
+                },
             )
 
         if not generated_files:
             return JSONResponse(
                 status_code=400,
-                content={"error": "Aucun fichier généré. Vérifiez les templates."}
+                content={"error": "Aucun fichier généré. Vérifiez les templates."},
             )
 
         with zipfile.ZipFile(output_zip, "w", zipfile.ZIP_DEFLATED) as zipf:
@@ -381,7 +543,7 @@ async def fill(request: Request):
         return FileResponse(
             path=str(output_zip),
             media_type="application/zip",
-            filename=output_zip.name
+            filename=output_zip.name,
         )
 
     except FileNotFoundError as e:
