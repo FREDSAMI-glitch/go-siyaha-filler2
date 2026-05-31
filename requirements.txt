@@ -3,3 +3,5 @@ uvicorn
 docxtpl
 openpyxl
 python-multipart
+python-docx
+jinja2
