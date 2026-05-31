@@ -237,6 +237,48 @@
       "note": "Date prévue de démarrage"
     },
     {
+  "sheet": "Synthèse",
+  "cell": "D23",
+  "field": "financement_expert.investissement_total_mad",
+  "type": "number"
+},
+{
+  "sheet": "Synthèse",
+  "cell": "D27",
+  "field": "financement_expert.fonds_propres_mad",
+  "type": "number"
+},
+{
+  "sheet": "Synthèse",
+  "cell": "D28",
+  "field": "financement_expert.credit_bancaire_mad",
+  "type": "number"
+},
+{
+  "sheet": "Synthèse",
+  "cell": "D29",
+  "field": "financement_expert.leasing_mad",
+  "type": "number"
+},
+{
+  "sheet": "Synthèse",
+  "cell": "D30",
+  "field": "financement_expert.credit_fournisseur_mad",
+  "type": "number"
+},
+{
+  "sheet": "Synthèse",
+  "cell": "D31",
+  "field": "financement_expert.financement_participatif_mad",
+  "type": "number"
+},
+{
+  "sheet": "Synthèse",
+  "cell": "D32",
+  "field": "financement_expert.prime_mad",
+  "type": "number"
+}
+    {
       "sheet": "Mode de financement",
       "cell": "G16",
       "field": "financement_expert.fonds_propres_kmad",
