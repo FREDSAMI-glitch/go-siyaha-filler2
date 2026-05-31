@@ -2,11 +2,13 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from docxtpl import DocxTemplate
 from openpyxl import load_workbook
+from openpyxl.utils.cell import range_boundaries, column_index_from_string
 from pathlib import Path
 from jinja2 import Environment, ChainableUndefined
 from docx import Document
 from docx.table import _Cell
 from docx.shared import Cm
+from docx.oxml.ns import qn
 import tempfile
 import zipfile
 import uuid
@@ -17,16 +19,7 @@ import copy
 app = FastAPI()
 
 API_DIR = Path(__file__).resolve().parent
-POSSIBLE_BASE_DIRS = [API_DIR, API_DIR.parent]
-
-BASE_DIR = None
-for d in POSSIBLE_BASE_DIRS:
-    if (d / "templates").exists() or (d / "mappings").exists():
-        BASE_DIR = d
-        break
-
-if BASE_DIR is None:
-    BASE_DIR = API_DIR.parent
+BASE_DIR = API_DIR.parent
 
 TEMPLATE_DIR = BASE_DIR / "templates"
 MAPPING_DIR = BASE_DIR / "mappings"
@@ -48,7 +41,35 @@ def as_dict(value):
     return value if isinstance(value, dict) else {}
 
 
-def deep_get(data, path, default=""):
+def is_empty(value):
+    return value is None or value == "" or value == [] or value == {}
+
+
+def find_file(filename):
+    possible_paths = [
+        TEMPLATE_DIR / filename,
+        MAPPING_DIR / filename,
+        BASE_DIR / filename,
+        API_DIR / filename,
+    ]
+
+    for path in possible_paths:
+        if path.exists():
+            return path
+
+    for folder in [TEMPLATE_DIR, MAPPING_DIR, BASE_DIR, API_DIR]:
+        if folder.exists():
+            for path in folder.rglob(filename):
+                if path.exists():
+                    return path
+
+    return None
+
+
+def deep_get(data, path, default=None):
+    if not path:
+        return default
+
     current = data
 
     for part in str(path).split("."):
@@ -68,42 +89,59 @@ def deep_get(data, path, default=""):
 def get_context_value(context, path, default=""):
     value = deep_get(context, path, None)
 
-    if value is not None and value != "":
+    if value not in [None, "", [], {}]:
         return value
 
     dap = context.get("dap", {})
-
     if isinstance(dap, dict):
         value = deep_get(dap, path, None)
-
-        if value is not None and value != "":
+        if value not in [None, "", [], {}]:
             return value
 
     return default
 
 
-def to_number(value):
+def parse_number(value):
     if value is None or value == "":
-        return 0
+        return None
+
+    if isinstance(value, bool):
+        return int(value)
 
     if isinstance(value, (int, float)):
         return value
 
     text = str(value).strip()
-    text = text.replace(" ", "").replace("\u00a0", "").replace(",", ".")
+    text = text.replace("\xa0", " ")
+    text = re.sub(r"[^\d,.\-]", "", text)
 
-    if text.endswith("%"):
-        try:
-            return float(text.replace("%", "")) / 100
-        except Exception:
-            return 0
+    if not text:
+        return None
 
-    text = re.sub(r"[^0-9.\-]", "", text)
+    if text.count(",") > 1 and "." not in text:
+        text = text.replace(",", "")
+    elif text.count(".") > 1 and "," not in text:
+        text = text.replace(".", "")
+    elif "," in text and "." in text:
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif "," in text and "." not in text:
+        text = text.replace(",", ".")
 
     try:
-        return float(text)
+        number = float(text)
+        if number.is_integer():
+            return int(number)
+        return number
     except Exception:
-        return 0
+        return None
+
+
+def to_number(value):
+    number = parse_number(value)
+    return 0 if number is None else number
 
 
 def format_display_value(value, fmt=None):
@@ -111,50 +149,113 @@ def format_display_value(value, fmt=None):
         return ""
 
     if fmt in ["mad", "money"]:
-        n = to_number(value)
-        if n == 0:
+        number = to_number(value)
+        if number == 0:
             return ""
-        return f"{n:,.0f}".replace(",", " ") + " MAD"
+        return f"{number:,.0f}".replace(",", " ") + " MAD"
+
+    if fmt == "kmad":
+        number = to_number(value)
+        if number == 0:
+            return ""
+        return f"{number:,.0f}".replace(",", " ") + " KMAD"
 
     if fmt == "percent":
-        n = to_number(value)
-        if n == 0:
+        number = to_number(value)
+        if number == 0:
             return ""
-        if n <= 1:
-            n = n * 100
-        return f"{n:.0f}%"
-
-    if fmt == "mmad_an":
-        n = to_number(value)
-        if n == 0:
-            return ""
-        return f"{n:,.1f}".replace(",", " ") + " MMAD/an"
+        if number <= 1:
+            number = number * 100
+        return f"{number:.0f}%"
 
     if fmt in ["number", "integer", "float"]:
-        n = to_number(value)
-        return str(int(n)) if n == int(n) else str(n)
+        number = to_number(value)
+        return str(int(number)) if number == int(number) else str(number)
 
     return str(value)
 
 
-def normalize_value(value, value_type="text"):
-    if value_type in ["number", "integer", "float"]:
-        return to_number(value)
+def normalize_excel_value(value, mapping_item, source_path=None, category=None):
+    if is_empty(value):
+        if "default_by_category" in mapping_item:
+            defaults = mapping_item["default_by_category"]
+            value = defaults.get(category, defaults.get("default"))
+        elif "default" in mapping_item:
+            value = mapping_item.get("default")
+        else:
+            return None
 
-    if value_type == "boolean":
-        return bool(value)
+    value_type = mapping_item.get("type")
+    unit = str(mapping_item.get("unit", "")).upper()
 
-    if value_type in ["money", "mad"]:
-        return format_display_value(value, "mad")
+    if value_type == "list":
+        return normalize_list_value(value, mapping_item.get("allowed_values", []))
 
-    return value if value is not None else ""
+    if value_type in ["number", "integer", "float", "money"]:
+        number = parse_number(value)
+
+        if number is None:
+            return None
+
+        if unit == "KMAD":
+            if source_path and source_path.endswith("_mad"):
+                number = number / 1000
+            elif abs(number) >= 100000:
+                number = number / 1000
+
+        return number
+
+    return value
+
+
+def normalize_list_value(value, allowed_values):
+    if is_empty(value):
+        return None
+
+    raw = str(value).strip()
+    raw_low = raw.lower()
+
+    for allowed in allowed_values:
+        if raw == allowed:
+            return allowed
+
+    for allowed in allowed_values:
+        if raw_low == allowed.lower():
+            return allowed
+
+    if "animation" in raw_low:
+        for allowed in allowed_values:
+            if "animation" in allowed.lower():
+                return allowed
+
+    if "restaurant" in raw_low or "restauration" in raw_low:
+        for allowed in allowed_values:
+            if "restaurant" in allowed.lower():
+                return allowed
+
+    if "hébergement" in raw_low or "hebergement" in raw_low or "hotel" in raw_low:
+        for allowed in allowed_values:
+            if "hébergement" in allowed.lower() or "hebergement" in allowed.lower():
+                return allowed
+
+    if "création" in raw_low or "creation" in raw_low:
+        for allowed in allowed_values:
+            if "création" in allowed.lower() or "creation" in allowed.lower():
+                return allowed
+
+    if "extension" in raw_low:
+        for allowed in allowed_values:
+            if "extension" in allowed.lower():
+                return allowed
+
+    return raw
 
 
 # =========================================================
 # CONTEXTE PAR DÉFAUT
 # =========================================================
 
-def add_docx_defaults(context):
+def add_context_defaults(context):
     context.setdefault("dossier", {})
     context.setdefault("entreprise", {})
     context.setdefault("dirigeant", {})
@@ -164,8 +265,9 @@ def add_docx_defaults(context):
     context.setdefault("investissements", {})
     context.setdefault("financement_pi", {})
     context.setdefault("financement_expert", {})
-    context.setdefault("hypotheses_financieres", {})
     context.setdefault("financement_checkbox", {})
+    context.setdefault("hypotheses_financieres", {})
+    context.setdefault("dap", {})
 
     for key in [
         "dossier",
@@ -176,8 +278,9 @@ def add_docx_defaults(context):
         "emplois",
         "financement_pi",
         "financement_expert",
-        "hypotheses_financieres",
         "financement_checkbox",
+        "hypotheses_financieres",
+        "dap",
     ]:
         context[key] = as_dict(context.get(key))
 
@@ -186,7 +289,6 @@ def add_docx_defaults(context):
         "date_dossier": "",
         "lieu_signature": "",
         "date_signature": "",
-        "numero_dossier": "",
         "programme": "GO SIYAHA",
 
         "raison_sociale": "",
@@ -332,7 +434,7 @@ def add_docx_defaults(context):
     context["projet"].setdefault("description", context["projet"].get("objet", ""))
     context["projet"].setdefault("investissement_total_mad", context["projet"].get("investissement_total", 0))
     context["projet"].setdefault("adresse_site", context["projet"].get("adresse_installations", ""))
-    context["projet"].setdefault("secteur", context["projet"].get("branche_activite", ""))
+    context["projet"].setdefault("secteur", context["projet"].get("branche_activite", "Animation touristique"))
     context["projet"].setdefault("secteur_activite_projet", context["projet"].get("secteur", "Animation touristique"))
     context["projet"].setdefault("responsable_nom", context["dirigeant"].get("nom", ""))
     context["projet"].setdefault("responsable_mobile", context["dirigeant"].get("mobile", ""))
@@ -370,150 +472,294 @@ def add_docx_defaults(context):
 
 
 # =========================================================
-# EXCEL / BP
+# BP EXCEL
 # =========================================================
 
-def write_cell(ws, cell_ref, value, value_type="text"):
+def build_candidate_paths(mapping_item):
+    paths = []
+
+    for path in mapping_item.get("field_candidates", []):
+        if path and path not in paths:
+            paths.append(path)
+
+    field = mapping_item.get("field")
+    if field and field not in paths:
+        paths.append(field)
+
+    extra = []
+
+    for path in paths:
+        if path.endswith("_kmad"):
+            extra.append(path[:-5] + "_mad")
+        if ".financement_expert." in path:
+            extra.append(path.replace(".financement_expert.", ".financement."))
+        if path.startswith("financement_expert."):
+            extra.append(path.replace("financement_expert.", "financement."))
+
+    for path in extra:
+        if path not in paths:
+            paths.append(path)
+
+    return paths
+
+
+def get_value_from_mapping(data, mapping_item):
+    for path in build_candidate_paths(mapping_item):
+        value = get_context_value(data, path, None)
+
+        if not is_empty(value):
+            return value, path
+
+    if "default" in mapping_item:
+        return mapping_item.get("default"), "__default__"
+
+    return None, None
+
+
+def cell_to_row_col(cell_ref):
+    match = re.match(r"^([A-Z]+)([0-9]+)$", str(cell_ref).upper())
+
+    if not match:
+        return None, None
+
+    col = column_index_from_string(match.group(1))
+    row = int(match.group(2))
+
+    return row, col
+
+
+def build_blocked_ranges(mapping):
+    blocked = {}
+
+    for rule in mapping.get("never_write", []):
+        sheet = rule.get("sheet")
+
+        if not sheet:
+            continue
+
+        blocked.setdefault(sheet, [])
+
+        for rng in rule.get("ranges", []):
+            try:
+                min_col, min_row, max_col, max_row = range_boundaries(rng)
+                blocked[sheet].append((min_row, min_col, max_row, max_col, rng))
+            except Exception:
+                pass
+
+    return blocked
+
+
+def is_blocked_cell(sheet_name, cell_ref, blocked_ranges):
+    row, col = cell_to_row_col(cell_ref)
+
+    if row is None:
+        return True
+
+    for min_row, min_col, max_row, max_col, _ in blocked_ranges.get(sheet_name, []):
+        if min_row <= row <= max_row and min_col <= col <= max_col:
+            return True
+
+    return False
+
+
+def write_excel_cell(ws, cell_ref, value, blocked_ranges):
+    if is_blocked_cell(ws.title, cell_ref, blocked_ranges):
+        return False
+
     cell = ws[cell_ref]
 
-    if isinstance(cell.value, str) and cell.value.startswith("="):
-        return
+    if cell.data_type == "f" or (isinstance(cell.value, str) and cell.value.startswith("=")):
+        return False
 
-    cell.value = normalize_value(value, value_type)
+    if value is None:
+        return False
+
+    cell.value = value
+
+    return True
 
 
-def apply_simple_mappings(wb, context, mappings):
-    for item in mappings:
+def write_mapping_section(wb, data, mapping, section_name, blocked_ranges):
+    count = 0
+
+    for item in mapping.get(section_name, []):
         sheet_name = item.get("sheet")
         cell_ref = item.get("cell")
-        field = item.get("field")
-        value_type = item.get("type", "text")
 
-        if not sheet_name or not cell_ref or not field:
+        if not sheet_name or not cell_ref:
             continue
 
         if sheet_name not in wb.sheetnames:
             continue
 
-        ws = wb[sheet_name]
-        value = get_context_value(context, field, "")
-        write_cell(ws, cell_ref, value, value_type)
+        value, source_path = get_value_from_mapping(data, item)
+        value = normalize_excel_value(value, item, source_path=source_path)
+
+        if value is None:
+            continue
+
+        if write_excel_cell(wb[sheet_name], cell_ref, value, blocked_ranges):
+            count += 1
+
+    return count
 
 
-def normalize_investissements(data):
-    investissements = data.get("investissements", {})
+def normalize_category_name(value):
+    if not value:
+        return ""
+
+    text = str(value).lower()
+    text = text.replace("é", "e").replace("è", "e").replace("ê", "e")
+    text = text.replace("à", "a").replace("â", "a")
+    text = text.replace("ç", "c")
+    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+
+    if "terrain" in text:
+        return "terrain"
+    if "construction" in text:
+        return "constructions"
+    if "amenagement" in text or "agencement" in text:
+        return "amenagement_agencement"
+    if "materiel" in text or "equipement" in text:
+        return "materiel_equipement"
+    if "frais" in text and "prelim" in text:
+        return "frais_preliminaires"
+    if "divers" in text or "imprevu" in text:
+        return "divers_imprevus"
+
+    return text
+
+
+def get_bp_source_array(data, source_array, category):
+    arr = get_context_value(data, source_array, None)
+
+    if isinstance(arr, list):
+        return arr
+
+    if isinstance(arr, dict):
+        return list(arr.values())
+
+    investissements = data.get("investissements")
 
     if isinstance(investissements, dict):
-        return investissements
+        possible = investissements.get(category)
 
-    result = {
-        "terrain": [],
-        "constructions": [],
-        "amenagement_agencement": [],
-        "materiel_equipement": [],
-        "frais_preliminaires": [],
-        "divers_imprevus": [],
-    }
+        if isinstance(possible, list):
+            return possible
 
     if isinstance(investissements, list):
+        filtered = []
+
         for item in investissements:
             if not isinstance(item, dict):
                 continue
 
-            cat = (
+            item_category = normalize_category_name(
                 item.get("categorie")
                 or item.get("category")
                 or item.get("type")
-                or ""
-            ).lower()
+                or item.get("rubrique")
+            )
 
-            if "terrain" in cat:
-                result["terrain"].append(item)
-            elif "construction" in cat:
-                result["constructions"].append(item)
-            elif "amenagement" in cat or "aménagement" in cat or "agencement" in cat:
-                result["amenagement_agencement"].append(item)
-            elif "materiel" in cat or "matériel" in cat or "equipement" in cat or "équipement" in cat:
-                result["materiel_equipement"].append(item)
-            elif "frais" in cat or "preliminaire" in cat or "préliminaire" in cat:
-                result["frais_preliminaires"].append(item)
-            elif "divers" in cat or "imprevu" in cat or "imprévu" in cat:
-                result["divers_imprevus"].append(item)
-            else:
-                result["materiel_equipement"].append(item)
+            if item_category == category:
+                filtered.append(item)
 
-    return result
+        return filtered
+
+    return []
 
 
-def apply_table_mappings(wb, context, table_mappings):
-    investissements = normalize_investissements(context)
+def write_bp_table_mappings(wb, data, mapping, blocked_ranges):
+    count = 0
 
-    for table in table_mappings:
+    for table in mapping.get("table_mappings", []):
         sheet_name = table.get("sheet")
-        source_array = table.get("source_array", "")
-        start_row = int(table.get("start_row", 0))
-        end_row = int(table.get("end_row", 0))
-        columns = table.get("columns", [])
+        category = table.get("category")
+        start_row = table.get("start_row")
+        end_row = table.get("end_row")
 
         if sheet_name not in wb.sheetnames:
             continue
 
-        if not start_row or not end_row:
+        if start_row is None or end_row is None:
             continue
 
         ws = wb[sheet_name]
-        source_key = source_array.split(".")[-1]
-        rows = investissements.get(source_key, [])
+        rows = get_bp_source_array(data, table.get("source_array"), category)
 
         if not isinstance(rows, list):
             continue
 
-        max_rows = end_row - start_row + 1
+        max_rows = max(0, int(end_row) - int(start_row) + 1)
 
-        for i, row_data in enumerate(rows[:max_rows]):
-            excel_row = start_row + i
+        for index, row_data in enumerate(rows[:max_rows]):
+            excel_row = int(start_row) + index
 
-            for col in columns:
-                column_letter = col.get("column")
-                field = col.get("field")
-                value_type = col.get("type", "text")
-                default_value = col.get("default", "")
+            for col_map in table.get("columns", []):
+                col_letter = col_map.get("column")
+                field = col_map.get("field")
 
-                if not column_letter or not field:
+                if not col_letter or not field:
                     continue
 
-                cell_ref = f"{column_letter}{excel_row}"
-                value = row_data.get(field, default_value)
+                value = deep_get(row_data, field, None)
 
-                write_cell(ws, cell_ref, value, value_type)
+                if is_empty(value):
+                    if "default_by_category" in col_map:
+                        defaults = col_map["default_by_category"]
+                        value = defaults.get(category, defaults.get("default"))
+                    elif "default" in col_map:
+                        value = col_map["default"]
+                    else:
+                        continue
+
+                value = normalize_excel_value(value, col_map, source_path=field, category=category)
+                cell_ref = f"{col_letter}{excel_row}"
+
+                if write_excel_cell(ws, cell_ref, value, blocked_ranges):
+                    count += 1
+
+    return count
+
+
+def force_excel_recalculation(wb):
+    try:
+        wb.calculation.fullCalcOnLoad = True
+        wb.calculation.forceFullCalc = True
+        wb.calculation.calcMode = "auto"
+    except Exception:
+        pass
 
 
 def render_bp_excel(output_path, context):
-    template_path = TEMPLATE_DIR / "BP_template.xlsx"
-    mapping_path = MAPPING_DIR / "mapping_bp_istitmar.json"
+    template_path = find_file("BP_template.xlsx")
+    mapping_path = find_file("mapping_bp_istitmar.json")
 
-    if not template_path.exists():
-        raise FileNotFoundError("Template Excel introuvable : templates/BP_template.xlsx")
+    if template_path is None:
+        raise FileNotFoundError("BP_template.xlsx introuvable dans /templates")
 
-    if not mapping_path.exists():
-        raise FileNotFoundError("Mapping BP introuvable : mappings/mapping_bp_istitmar.json")
+    if mapping_path is None:
+        raise FileNotFoundError("mapping_bp_istitmar.json introuvable dans /mappings")
 
     with open(mapping_path, "r", encoding="utf-8") as f:
         mapping = json.load(f)
 
     wb = load_workbook(template_path)
+    blocked_ranges = build_blocked_ranges(mapping)
 
-    apply_simple_mappings(wb, context, mapping.get("scalar_mappings", []))
-    apply_simple_mappings(wb, context, mapping.get("financement_pi_mappings", []))
-    apply_table_mappings(wb, context, mapping.get("table_mappings", []))
-    apply_simple_mappings(wb, context, mapping.get("cpc_mappings", []))
-    apply_simple_mappings(wb, context, mapping.get("bilan_mappings", []))
-    apply_simple_mappings(wb, context, mapping.get("impacts_mappings", []))
+    written = {
+        "scalar_mappings": write_mapping_section(wb, context, mapping, "scalar_mappings", blocked_ranges),
+        "financement_pi_mappings": write_mapping_section(wb, context, mapping, "financement_pi_mappings", blocked_ranges),
+        "table_mappings": write_bp_table_mappings(wb, context, mapping, blocked_ranges),
+        "cpc_mappings": write_mapping_section(wb, context, mapping, "cpc_mappings", blocked_ranges),
+        "bilan_mappings": write_mapping_section(wb, context, mapping, "bilan_mappings", blocked_ranges),
+        "impacts_mappings": write_mapping_section(wb, context, mapping, "impacts_mappings", blocked_ranges),
+    }
 
-    wb.calculation.fullCalcOnLoad = True
-    wb.calculation.forceFullCalc = True
-
+    force_excel_recalculation(wb)
     wb.save(output_path)
+
+    return written
 
 
 # =========================================================
@@ -535,13 +781,26 @@ def safe_table_rows(table):
 
 
 def safe_row_cells(row, table):
+    cells = []
+
+    try:
+        for child in row._tr.iterchildren():
+            if child.tag == qn("w:tc"):
+                cells.append(_Cell(child, row))
+            elif child.tag == qn("w:sdt"):
+                for sdt_child in child.iter():
+                    if sdt_child.tag == qn("w:tc"):
+                        cells.append(_Cell(sdt_child, row))
+    except Exception:
+        pass
+
+    if cells:
+        return cells
+
     try:
         return list(row.cells)
     except Exception:
-        try:
-            return [_Cell(tc, table) for tc in row._tr.tc_lst]
-        except Exception:
-            return []
+        return []
 
 
 def get_table_by_index(doc, index):
@@ -668,7 +927,7 @@ def find_docx_table(doc, anchor_label):
 
 
 # =========================================================
-# DAP AVANCÉ
+# DAP WORD AVANCÉ
 # =========================================================
 
 def get_expert_default(mapping, field):
@@ -681,31 +940,33 @@ def get_expert_default(mapping, field):
 
 
 def generate_default_rows(source_array, context):
+    key = str(source_array).split(".")[-1]
+
     projet = context.get("projet", {})
     entreprise = context.get("entreprise", {})
     emplois = context.get("emplois", {})
 
-    objet = projet.get("objet") or projet.get("description") or "activité touristique"
-    ville = projet.get("ville_region") or "la région ciblée"
+    objet = projet.get("objet") or projet.get("description") or "activité d’animation touristique"
+    ville = projet.get("ville_region") or projet.get("region") or "la zone d’implantation"
     ca = to_number(projet.get("ca_prevu_annee_1", 0))
-    effectif = int(to_number(projet.get("effectif") or emplois.get("directs") or 5))
+    effectif = int(to_number(projet.get("effectif") or emplois.get("directs") or emplois.get("emplois_directs") or 5))
 
-    if source_array == "gamme_services":
+    if key == "gamme_services":
         return [
             {
                 "domaine_activite": "Animation touristique",
                 "description": objet,
-                "marche_adressable": f"Touristes et clientèle locale à {ville}",
+                "marche_adressable": f"Touristes nationaux, touristes étrangers et clientèle locale à {ville}",
                 "pourcentage_ca": "100%",
                 "image_slot": "Image illustrative à ajouter",
             }
         ]
 
-    if source_array == "marche_cibles":
+    if key == "marche_cibles":
         return [
             {
                 "domaine_activite": "Animation touristique",
-                "marche_cible": "Touristes nationaux et internationaux",
+                "marche_cible": "Touristes nationaux, touristes internationaux, familles, groupes et clientèle locale",
                 "taille_marche_mmad": "",
                 "tcam": "",
                 "source_taille_marche": "Estimation interne",
@@ -713,51 +974,51 @@ def generate_default_rows(source_array, context):
             }
         ]
 
-    if source_array == "concurrents":
+    if key == "concurrents":
         return [
             {
-                "nom": "Opérateurs locaux",
+                "nom": "Opérateurs touristiques locaux",
                 "implantation": ville,
-                "categorie": "Concurrence directe/indirecte",
+                "categorie": "Concurrence directe et indirecte",
                 "part_marche": "",
-                "principaux_services": "Activités touristiques et loisirs",
+                "principaux_services": "Activités touristiques, loisirs, animation et expériences clients",
             }
         ]
 
-    if source_array == "fournisseurs":
+    if key == "fournisseurs":
         return [
             {
-                "nom": "Fournisseurs locaux",
-                "categorie": "Équipements et consommables",
-                "produits_services": "Matériel, maintenance, services opérationnels",
+                "nom": "Fournisseurs locaux et nationaux",
+                "categorie": "Équipements, consommables et maintenance",
+                "produits_services": "Matériel d’exploitation, maintenance, fournitures et prestations de support",
                 "part_achats": "",
                 "delai_reglement_jours": "30",
-                "modalites_achat": "Devis, bon de commande et règlement selon conditions négociées",
+                "modalites_achat": "Achat sur devis, bon de commande et règlement selon conditions négociées",
             }
         ]
 
-    if source_array == "clients_creneaux":
+    if key == "clients_creneaux":
         return [
             {
                 "creneau_service": "Clientèle touristique",
-                "principaux_clients": "Touristes nationaux, touristes étrangers, familles et groupes",
+                "principaux_clients": "Touristes nationaux, touristes étrangers, familles, groupes et agences partenaires",
                 "categorie": "B2C/B2B",
                 "part_ca": "100%",
                 "delai_recouvrement_jours": "0",
-                "modalites_vente": "Paiement comptant, réservation en ligne et partenariats",
+                "modalites_vente": "Paiement comptant, réservation en ligne et partenariats commerciaux",
             }
         ]
 
-    if source_array == "politique_prix":
+    if key == "politique_prix":
         return [
             {
                 "famille_service": "Animation touristique",
-                "strategie_prix": "Prix aligné sur le marché avec différenciation par qualité d’expérience",
-                "commentaire": "Tarification modulable selon saison, groupes et partenariats touristiques",
+                "strategie_prix": "Prix aligné sur le marché avec différenciation par la qualité de l’expérience",
+                "commentaire": "Tarification modulable selon la saison, les groupes, les offres packagées et les partenariats",
             }
         ]
 
-    if source_array == "capacites_animation":
+    if key == "capacites_animation":
         return [
             {
                 "domaine_activite": "Animation touristique",
@@ -768,7 +1029,7 @@ def generate_default_rows(source_array, context):
             }
         ]
 
-    if source_array == "emplois_directs_profils":
+    if key == "emplois_directs_profils":
         return [
             {
                 "profil_domaine": "Exploitation et animation",
@@ -779,7 +1040,7 @@ def generate_default_rows(source_array, context):
             }
         ]
 
-    if source_array == "ca_previsionnel_dap.lignes":
+    if key == "lignes":
         return [
             {
                 "libelle": "Animation touristique",
@@ -796,7 +1057,7 @@ def generate_default_rows(source_array, context):
     return []
 
 
-def get_source_array(context, source_array, mapping_item=None):
+def get_dap_source_array(context, source_array, mapping_item=None):
     data = get_context_value(context, source_array, None)
 
     if isinstance(data, list):
@@ -818,7 +1079,7 @@ def get_source_array(context, source_array, mapping_item=None):
 
 def apply_scalar_text_replacements(doc, context, mapping):
     for item in mapping.get("scalar_text_replacements", []):
-        placeholder = item.get("placeholder")
+        placeholder = item.get("placeholder") or item.get("search")
         field = item.get("field")
         fmt = item.get("format") or item.get("type")
 
@@ -832,6 +1093,46 @@ def apply_scalar_text_replacements(doc, context, mapping):
 
         value = format_display_value(value, fmt)
         replace_text_everywhere(doc, placeholder, value)
+
+
+def apply_legacy_text_replacements(doc, context, mapping):
+    for item in mapping.get("text_replacements", []) + mapping.get("literal_replacements", []):
+        search = item.get("search")
+        field = item.get("field")
+        replacement = item.get("replacement")
+
+        if not search:
+            continue
+
+        if field:
+            replacement = get_context_value(context, field, "")
+
+        replace_text_everywhere(doc, search, replacement or "")
+
+
+def apply_legacy_label_mappings(doc, context, mapping):
+    label_mappings = (
+        mapping.get("cell_mappings", [])
+        + mapping.get("label_mappings", [])
+        + mapping.get("field_mappings", [])
+    )
+
+    for item in label_mappings:
+        label = item.get("label") or item.get("search")
+        field = item.get("field")
+        position = item.get("position", "right")
+        occurrence = int(item.get("occurrence", 1))
+        fmt = item.get("format") or item.get("type")
+
+        if not label or not field:
+            continue
+
+        value = get_context_value(context, field, "")
+
+        if value in ["", None]:
+            continue
+
+        fill_cell_next_to_label(doc, label, format_display_value(value, fmt), position, occurrence)
 
 
 def apply_table_cell_mappings(doc, context, mapping):
@@ -881,7 +1182,7 @@ def apply_table_cell_mappings(doc, context, mapping):
         if target == "authorization_row":
             array_path = item.get("array")
             array_index = int(item.get("array_index", 0))
-            rows_data = get_source_array(context, array_path)
+            rows_data = get_dap_source_array(context, array_path)
 
             if 0 <= array_index < len(rows_data):
                 row_data = rows_data[array_index]
@@ -904,12 +1205,10 @@ def apply_table_cell_mappings(doc, context, mapping):
 
         value = format_display_value(value, fmt)
 
-        if target == "right":
-            target_idx = 1 if len(cells) > 1 else 0
-        else:
-            target_idx = 1 if len(cells) > 1 else 0
+        if len(cells) < 2:
+            continue
 
-        set_cell_value(cells[target_idx], value)
+        set_cell_value(cells[1], value)
 
 
 def fill_image_cell(cell, image_path, fallback_text, width_cm=4.5, height_cm=3.0):
@@ -944,7 +1243,7 @@ def apply_repeat_table_mappings(doc, context, mapping):
 
         rows = safe_table_rows(table)
         source_array = item.get("source_array", "")
-        data_rows = get_source_array(context, source_array, item)
+        data_rows = get_dap_source_array(context, source_array, item)
 
         if not data_rows:
             continue
@@ -1131,54 +1430,16 @@ def apply_checkbox_mappings(doc, context, mapping):
         unchecked_value = item.get("unchecked_value", "☐")
         mark = checked_value if checked else unchecked_value
 
-        replace_text_everywhere(doc, f"☐ {label}", f"{mark} {label}")
-        replace_text_everywhere(doc, f"□ {label}", f"{mark} {label}")
+        label_norm = normalize_label(label)
 
+        for paragraph in iter_all_paragraphs(doc):
+            try:
+                txt_norm = normalize_label(paragraph.text)
 
-def apply_legacy_label_mappings(doc, context, mapping):
-    label_mappings = (
-        mapping.get("cell_mappings", [])
-        + mapping.get("label_mappings", [])
-        + mapping.get("field_mappings", [])
-    )
-
-    for item in label_mappings:
-        label = item.get("label") or item.get("search")
-        field = item.get("field")
-        position = item.get("position", "right")
-        occurrence = int(item.get("occurrence", 1))
-        value_type = item.get("type", "text")
-
-        if not label or not field:
-            continue
-
-        value = normalize_value(get_context_value(context, field, ""), value_type)
-
-        if value in ["", None]:
-            continue
-
-        fill_cell_next_to_label(doc, label, value, position, occurrence)
-
-
-def apply_legacy_text_replacements(doc, context, mapping):
-    for item in mapping.get("text_replacements", []) + mapping.get("literal_replacements", []):
-        search = item.get("search")
-        field = item.get("field")
-        replacement = item.get("replacement")
-
-        if not search:
-            continue
-
-        if field:
-            replacement = get_context_value(context, field, "")
-
-        replace_text_everywhere(doc, search, replacement or "")
-
-
-def apply_cleanup_placeholders(doc, mapping):
-    for placeholder in mapping.get("cleanup_placeholders", []):
-        if placeholder and len(str(placeholder)) > 2:
-            replace_text_everywhere(doc, placeholder, "")
+                if label_norm in txt_norm and ("☐" in paragraph.text or "□" in paragraph.text or "☑" in paragraph.text):
+                    paragraph.text = f"{mark} {label}"
+            except Exception:
+                continue
 
 
 def apply_dap_default_mappings(doc, context):
@@ -1211,11 +1472,11 @@ def apply_dap_default_mappings(doc, context):
 
 
 def apply_dap_mapping_file(doc, context):
-    mapping_path = MAPPING_DIR / "mapping_dap_istitmar.json"
+    mapping_path = find_file("mapping_dap_istitmar.json")
 
-    if not mapping_path.exists():
+    if mapping_path is None:
         apply_dap_default_mappings(doc, context)
-        return
+        return {"mapping_used": False, "reason": "mapping_dap_istitmar.json introuvable"}
 
     with open(mapping_path, "r", encoding="utf-8") as f:
         mapping = json.load(f)
@@ -1228,18 +1489,27 @@ def apply_dap_mapping_file(doc, context):
     apply_single_row_table_mappings(doc, context, mapping)
     apply_paragraph_mappings(doc, context, mapping)
     apply_checkbox_mappings(doc, context, mapping)
-
     apply_dap_default_mappings(doc, context)
-    apply_cleanup_placeholders(doc, mapping)
+
+    if mapping.get("cleanup_enabled") is True:
+        for placeholder in mapping.get("cleanup_placeholders", []):
+            replace_text_everywhere(doc, placeholder, "")
+
+    return {
+        "mapping_used": True,
+        "mapping_path": str(mapping_path),
+        "mapping_name": mapping.get("mapping_name"),
+        "version": mapping.get("version"),
+    }
 
 
-def render_dap_with_mapping(output_path, context):
-    template_path = TEMPLATE_DIR / "DAP_template.docx"
+def render_dap_docx(output_path, context):
+    template_path = find_file("DAP_template.docx")
 
-    if not template_path.exists():
-        raise FileNotFoundError("Template Word introuvable : DAP_template.docx")
+    if template_path is None:
+        raise FileNotFoundError("DAP_template.docx introuvable dans /templates")
 
-    safe_context = add_docx_defaults(copy.deepcopy(context))
+    safe_context = add_context_defaults(copy.deepcopy(context))
     tmp_docx = Path(tempfile.gettempdir()) / f"tmp_dap_{uuid.uuid4()}.docx"
 
     doc_tpl = DocxTemplate(str(template_path))
@@ -1247,15 +1517,17 @@ def render_dap_with_mapping(output_path, context):
     doc_tpl.save(str(tmp_docx))
 
     doc = Document(str(tmp_docx))
-    apply_dap_mapping_file(doc, safe_context)
+    info = apply_dap_mapping_file(doc, safe_context)
     doc.save(str(output_path))
+
+    return info
 
 
 # =========================================================
 # WORD / DOCUMENTS JURIDIQUES
 # =========================================================
 
-def apply_legal_doc_defaults(doc, context, template_name):
+def apply_legal_doc_defaults(doc, context):
     dossier = context.get("dossier", {})
     entreprise = context.get("entreprise", {})
     dirigeant = context.get("dirigeant", {})
@@ -1270,10 +1542,10 @@ def apply_legal_doc_defaults(doc, context, template_name):
     lieu = dossier.get("lieu_signature", "")
     date = dossier.get("date_signature", "")
 
-    banque_nom = banque.get("nom", "")
-    banque_forme = banque.get("forme_juridique", "Société Anonyme")
-    banque_capital = banque.get("capital", "")
-    banque_siege = banque.get("siege", "")
+    banque_nom = banque.get("nom", banque.get("banque_partenaire", ""))
+    banque_forme = banque.get("forme_juridique", banque.get("forme_juridique_banque", "Société Anonyme"))
+    banque_capital = banque.get("capital", banque.get("capital_social_banque", ""))
+    banque_siege = banque.get("siege", banque.get("siege_social", ""))
 
     for paragraph in iter_all_paragraphs(doc):
         text = paragraph.text
@@ -1304,24 +1576,20 @@ def apply_legal_doc_defaults(doc, context, template_name):
         elif "Objet" in text and "justificatifs déposés" in text:
             paragraph.text = (
                 f"Objet : Déclaration sur l’honneur relative aux justificatifs déposés par la société {raison} "
-                f"pour sa candidature au programme Go SIYAHA – Volet soutien à l’investissement :"
+                f"pour sa candidature au programme GO SIYAHA – Volet soutien à l’investissement."
             )
 
         elif "Fait à" in text and ("Le" in text or "le" in text or "………" in text):
             paragraph.text = f"Fait à : {lieu}    Le : {date}"
 
 
-def render_docx(template_name, output_path, context):
-    if template_name == "DAP_template.docx":
-        render_dap_with_mapping(output_path, context)
-        return
+def render_legal_docx(template_name, output_path, context):
+    template_path = find_file(template_name)
 
-    template_path = TEMPLATE_DIR / template_name
+    if template_path is None:
+        raise FileNotFoundError(f"{template_name} introuvable dans /templates")
 
-    if not template_path.exists():
-        raise FileNotFoundError(f"Template Word introuvable : {template_name}")
-
-    safe_context = add_docx_defaults(copy.deepcopy(context))
+    safe_context = add_context_defaults(copy.deepcopy(context))
     tmp_docx = Path(tempfile.gettempdir()) / f"tmp_docx_{uuid.uuid4()}.docx"
 
     doc_tpl = DocxTemplate(str(template_path))
@@ -1329,22 +1597,20 @@ def render_docx(template_name, output_path, context):
     doc_tpl.save(str(tmp_docx))
 
     doc = Document(str(tmp_docx))
-    apply_legal_doc_defaults(doc, safe_context, template_name)
+    apply_legal_doc_defaults(doc, safe_context)
     doc.save(str(output_path))
 
 
 # =========================================================
-# ROUTES
+# ROUTES DEBUG
 # =========================================================
 
 @app.get("/")
 def root():
     return {
         "status": "ok",
-        "message": "GO SIYAHA filler API",
+        "service": "GO SIYAHA filler API",
         "base_dir": str(BASE_DIR),
-        "templates_dir": str(TEMPLATE_DIR),
-        "mappings_dir": str(MAPPING_DIR),
     }
 
 
@@ -1354,22 +1620,71 @@ def health():
         "status": "ok",
         "base_dir": str(BASE_DIR),
         "templates": {
-            "DAP_template.docx": (TEMPLATE_DIR / "DAP_template.docx").exists(),
-            "BP_template.xlsx": (TEMPLATE_DIR / "BP_template.xlsx").exists(),
-            "demande_participation.docx": (TEMPLATE_DIR / "demande_participation.docx").exists(),
-            "engagement_capacite_financiere.docx": (TEMPLATE_DIR / "engagement_capacite_financiere.docx").exists(),
-            "engagement_autorisations.docx": (TEMPLATE_DIR / "engagement_autorisations.docx").exists(),
-            "declaration_honneur_justificatifs.docx": (TEMPLATE_DIR / "declaration_honneur_justificatifs.docx").exists(),
+            "BP_template.xlsx": find_file("BP_template.xlsx") is not None,
+            "DAP_template.docx": find_file("DAP_template.docx") is not None,
+            "demande_participation.docx": find_file("demande_participation.docx") is not None,
+            "engagement_capacite_financiere.docx": find_file("engagement_capacite_financiere.docx") is not None,
+            "engagement_autorisations.docx": find_file("engagement_autorisations.docx") is not None,
+            "declaration_honneur_justificatifs.docx": find_file("declaration_honneur_justificatifs.docx") is not None,
         },
         "mappings": {
-            "mapping_bp_istitmar.json": (MAPPING_DIR / "mapping_bp_istitmar.json").exists(),
-            "mapping_dap_istitmar.json": (MAPPING_DIR / "mapping_dap_istitmar.json").exists(),
+            "mapping_bp_istitmar.json": find_file("mapping_bp_istitmar.json") is not None,
+            "mapping_dap_istitmar.json": find_file("mapping_dap_istitmar.json") is not None,
         },
     }
 
+
+@app.get("/debug-bp")
+def debug_bp():
+    template_path = find_file("BP_template.xlsx")
+    mapping_path = find_file("mapping_bp_istitmar.json")
+
+    if template_path is None or mapping_path is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "status": "error",
+                "BP_template.xlsx": template_path is not None,
+                "mapping_bp_istitmar.json": mapping_path is not None,
+            }
+        )
+
+    try:
+        with open(mapping_path, "r", encoding="utf-8") as f:
+            mapping = json.load(f)
+
+        return {
+            "status": "ok",
+            "template_path": str(template_path),
+            "mapping_path": str(mapping_path),
+            "mapping_name": mapping.get("mapping_name"),
+            "version": mapping.get("version"),
+            "sections": {
+                "scalar_mappings": len(mapping.get("scalar_mappings", [])),
+                "financement_pi_mappings": len(mapping.get("financement_pi_mappings", [])),
+                "table_mappings": len(mapping.get("table_mappings", [])),
+                "cpc_mappings": len(mapping.get("cpc_mappings", [])),
+                "bilan_mappings": len(mapping.get("bilan_mappings", [])),
+                "impacts_mappings": len(mapping.get("impacts_mappings", [])),
+            },
+        }
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "error": str(e)}
+        )
+
+
 @app.get("/debug-mapping")
 def debug_mapping():
-    mapping_path = MAPPING_DIR / "mapping_dap_istitmar.json"
+    mapping_path = find_file("mapping_dap_istitmar.json")
+
+    if mapping_path is None:
+        return JSONResponse(
+            status_code=404,
+            content={"status": "error", "error": "mapping_dap_istitmar.json introuvable"}
+        )
 
     try:
         text = mapping_path.read_text(encoding="utf-8")
@@ -1380,7 +1695,7 @@ def debug_mapping():
             "mapping_path": str(mapping_path),
             "version": data.get("version"),
             "mapping_name": data.get("mapping_name"),
-            "sections": list(data.keys())
+            "sections": list(data.keys()),
         }
 
     except Exception as e:
@@ -1392,9 +1707,15 @@ def debug_mapping():
                 "status": "error",
                 "mapping_path": str(mapping_path),
                 "error": str(e),
-                "around_line_281": lines[276:286]
+                "around_line_281": lines[276:286],
             }
         )
+
+
+# =========================================================
+# ROUTE PRINCIPALE
+# =========================================================
+
 @app.post("/fill")
 async def fill(request: Request):
     try:
@@ -1408,6 +1729,8 @@ async def fill(request: Request):
         )
 
         aliases = {
+            "bp": "bp_excel",
+            "dap": "dap_word",
             "demande_honneur": "declaration_honneur_justificatifs",
             "engagement_capacite": "engagement_capacite_financiere",
             "declaration_factures": "declaration_honneur_justificatifs",
@@ -1415,46 +1738,8 @@ async def fill(request: Request):
 
         selected_template = aliases.get(selected_template, selected_template)
 
-        context = {
-            **data,
-            "selected_template": selected_template,
-            "dossier": data.get("dossier", {}),
-            "entreprise": data.get("entreprise", {}),
-            "dirigeant": data.get("dirigeant", {}),
-            "projet": data.get("projet", {}),
-            "investissements": data.get("investissements", {}),
-            "emplois": data.get("emplois", {}),
-            "banque": data.get("banque", {}),
-            "financement_pi": data.get("financement_pi", {}),
-            "cpc_historique": data.get("cpc_historique", {}),
-            "cpc_previsionnel": data.get("cpc_previsionnel", {}),
-            "bilan_historique": data.get("bilan_historique", {}),
-            "bilan_previsionnel": data.get("bilan_previsionnel", {}),
-            "impacts_historique": data.get("impacts_historique", {}),
-            "impacts_previsionnels": data.get("impacts_previsionnels", {}),
-            "hypotheses_financieres": data.get("hypotheses_financieres", {}),
-            "financement_expert": data.get("financement_expert", {}),
-            "financement_checkbox": data.get("financement_checkbox", {}),
-            "dap": data.get("dap", {}),
-            "gamme_services": data.get("gamme_services", []),
-            "marche_cibles": data.get("marche_cibles", []),
-            "concurrents": data.get("concurrents", []),
-            "fournisseurs": data.get("fournisseurs", []),
-            "clients_creneaux": data.get("clients_creneaux", []),
-            "politique_prix": data.get("politique_prix", []),
-            "capacites_animation": data.get("capacites_animation", []),
-            "emplois_directs_profils": data.get("emplois_directs_profils", []),
-            "recettes_devises": data.get("recettes_devises", []),
-            "achats_devises": data.get("achats_devises", {}),
-            "ca_previsionnel_dap": data.get("ca_previsionnel_dap", {}),
-            "synthese_etude_marche": data.get("synthese_etude_marche", ""),
-            "strategie_approvisionnement": data.get("strategie_approvisionnement", {}),
-            "strategie_commerciale": data.get("strategie_commerciale", {}),
-            "facteurs_differenciation": data.get("facteurs_differenciation", ""),
-            "attractivite_touristique": data.get("attractivite_touristique", ""),
-        }
-
-        context = add_docx_defaults(context)
+        context = add_context_defaults(copy.deepcopy(data))
+        context["selected_template"] = selected_template
 
         dossier = context["dossier"]
         entreprise = context["entreprise"]
@@ -1469,77 +1754,72 @@ async def fill(request: Request):
         output_zip = tmp_dir / f"{identifiant}_{societe}_GO_SIYAHA.zip"
         generated_files = []
         generation_errors = []
-
-        def add_docx_safe(template_name, output_name):
-            try:
-                output_path = tmp_dir / output_name
-                render_docx(template_name, output_path, context)
-                generated_files.append(output_path)
-            except Exception as e:
-                generation_errors.append(f"{template_name} : {str(e)}")
+        debug_info = {
+            "selected_template": selected_template,
+            "generated_files": [],
+            "errors": [],
+        }
 
         def add_bp_safe():
             try:
-                output_path = tmp_dir / f"{identifiant}_{societe}_BP.xlsx"
-                render_bp_excel(output_path, context)
+                output_path = tmp_dir / f"{identifiant}_{societe}_BP_GO_SIYAHA.xlsx"
+                written = render_bp_excel(output_path, context)
                 generated_files.append(output_path)
+                debug_info["bp_written"] = written
+                debug_info["generated_files"].append(output_path.name)
             except Exception as e:
-                generation_errors.append(f"BP_template.xlsx : {str(e)}")
+                error = f"BP_template.xlsx : {str(e)}"
+                generation_errors.append(error)
+                debug_info["errors"].append(error)
+
+        def add_dap_safe():
+            try:
+                output_path = tmp_dir / f"{identifiant}_{societe}_DAP_GO_SIYAHA.docx"
+                info = render_dap_docx(output_path, context)
+                generated_files.append(output_path)
+                debug_info["dap_info"] = info
+                debug_info["generated_files"].append(output_path.name)
+            except Exception as e:
+                error = f"DAP_template.docx : {str(e)}"
+                generation_errors.append(error)
+                debug_info["errors"].append(error)
+
+        def add_legal_safe(template_name, output_suffix):
+            try:
+                output_path = tmp_dir / f"{identifiant}_{societe}_{output_suffix}.docx"
+                render_legal_docx(template_name, output_path, context)
+                generated_files.append(output_path)
+                debug_info["generated_files"].append(output_path.name)
+            except Exception as e:
+                error = f"{template_name} : {str(e)}"
+                generation_errors.append(error)
+                debug_info["errors"].append(error)
 
         if selected_template == "bp_excel":
             add_bp_safe()
 
         elif selected_template == "dap_word":
-            add_docx_safe("DAP_template.docx", f"{identifiant}_{societe}_DAP.docx")
+            add_dap_safe()
 
         elif selected_template == "demande_participation":
-            add_docx_safe("demande_participation.docx", f"{identifiant}_{societe}_demande_participation.docx")
+            add_legal_safe("demande_participation.docx", "demande_participation")
 
         elif selected_template == "engagement_capacite_financiere":
-            add_docx_safe(
-                "engagement_capacite_financiere.docx",
-                f"{identifiant}_{societe}_engagement_capacite_financiere.docx",
-            )
+            add_legal_safe("engagement_capacite_financiere.docx", "engagement_capacite_financiere")
 
         elif selected_template == "engagement_autorisations":
-            add_docx_safe(
-                "engagement_autorisations.docx",
-                f"{identifiant}_{societe}_engagement_autorisations.docx",
-            )
+            add_legal_safe("engagement_autorisations.docx", "engagement_autorisations")
 
         elif selected_template == "declaration_honneur_justificatifs":
-            add_docx_safe(
-                "declaration_honneur_justificatifs.docx",
-                f"{identifiant}_{societe}_declaration_honneur_justificatifs.docx",
-            )
+            add_legal_safe("declaration_honneur_justificatifs.docx", "declaration_honneur_justificatifs")
 
-        elif selected_template == "dossier_complet":
-            if (TEMPLATE_DIR / "DAP_template.docx").exists():
-                add_docx_safe("DAP_template.docx", f"{identifiant}_{societe}_DAP.docx")
-
-            if (TEMPLATE_DIR / "BP_template.xlsx").exists():
-                add_bp_safe()
-
-            if (TEMPLATE_DIR / "demande_participation.docx").exists():
-                add_docx_safe("demande_participation.docx", f"{identifiant}_{societe}_demande_participation.docx")
-
-            if (TEMPLATE_DIR / "engagement_capacite_financiere.docx").exists():
-                add_docx_safe(
-                    "engagement_capacite_financiere.docx",
-                    f"{identifiant}_{societe}_engagement_capacite_financiere.docx",
-                )
-
-            if (TEMPLATE_DIR / "engagement_autorisations.docx").exists():
-                add_docx_safe(
-                    "engagement_autorisations.docx",
-                    f"{identifiant}_{societe}_engagement_autorisations.docx",
-                )
-
-            if (TEMPLATE_DIR / "declaration_honneur_justificatifs.docx").exists():
-                add_docx_safe(
-                    "declaration_honneur_justificatifs.docx",
-                    f"{identifiant}_{societe}_declaration_honneur_justificatifs.docx",
-                )
+        elif selected_template in ["dossier_complet", "all", "tout"]:
+            add_dap_safe()
+            add_bp_safe()
+            add_legal_safe("demande_participation.docx", "demande_participation")
+            add_legal_safe("engagement_capacite_financiere.docx", "engagement_capacite_financiere")
+            add_legal_safe("engagement_autorisations.docx", "engagement_autorisations")
+            add_legal_safe("declaration_honneur_justificatifs.docx", "declaration_honneur_justificatifs")
 
         else:
             return JSONResponse(
@@ -1562,14 +1842,21 @@ async def fill(request: Request):
             error_report = tmp_dir / "rapport_erreurs_generation.txt"
             error_report.write_text(
                 "Erreurs de génération GO SIYAHA\n\n" + "\n".join(generation_errors),
-                encoding="utf-8"
+                encoding="utf-8",
             )
             generated_files.append(error_report)
+
+        debug_path = tmp_dir / "debug_generation.json"
+        debug_path.write_text(
+            json.dumps(debug_info, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        generated_files.append(debug_path)
 
         if not generated_files:
             return JSONResponse(
                 status_code=400,
-                content={"error": "Aucun fichier généré. Vérifiez les templates."},
+                content={"error": "Aucun fichier généré."},
             )
 
         with zipfile.ZipFile(output_zip, "w", zipfile.ZIP_DEFLATED) as zipf:
@@ -1582,8 +1869,8 @@ async def fill(request: Request):
             filename=output_zip.name,
         )
 
-    except FileNotFoundError as e:
-        return JSONResponse(status_code=404, content={"error": str(e)})
-
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)},
+        )
