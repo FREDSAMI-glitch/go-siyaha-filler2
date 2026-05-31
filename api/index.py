@@ -565,10 +565,57 @@ def add_context_defaults(context):
     context["financement_checkbox"]["credit_fournisseur"] = "☑" if to_number(financement.get("credit_fournisseur_kmad", 0)) > 0 else "☐"
     context["financement_checkbox"]["leasing"] = "☑" if to_number(financement.get("leasing_kmad", 0)) > 0 else "☐"
 
-    # Valeurs narratives DAP
-    context.setdefault("synthese_etude_marche", "Le marché ciblé présente un potentiel favorable grâce à la dynamique touristique régionale, à la demande croissante pour des expériences de loisirs structurées et à la complémentarité du projet avec l’offre touristique existante.")
-    context.setdefault("facteurs_differenciation", projet.get("facteurs_differenciation", ""))
-    context.setdefault("attractivite_touristique", projet.get("attractivite_touristique", ""))
+    # Valeurs narratives DAP : remplacer aussi les chaînes vides envoyées par n8n/OpenRouter.
+    default_synthese_marche = (
+        "Le projet s’inscrit dans un marché touristique régional en développement, porté par la reprise de la demande, "
+        "la diversification des expériences recherchées par les visiteurs et le besoin d’offres d’animation mieux structurées. "
+        "La clientèle ciblée est composée de touristes nationaux, de touristes étrangers, de familles, de groupes et de clients locaux. "
+        "L’offre proposée permet de renforcer l’attractivité de la destination, d’améliorer l’expérience client et de créer une complémentarité avec les établissements d’hébergement, restaurants, agences de voyages et opérateurs touristiques locaux."
+    )
+    default_approvisionnement = (
+        "La stratégie d’approvisionnement repose sur la mobilisation de fournisseurs locaux et nationaux pour les équipements, "
+        "les consommables, la maintenance et les prestations de support. L’entreprise privilégiera des achats sur devis et bons de commande, "
+        "avec une sélection basée sur la qualité, la disponibilité, les délais de livraison, le service après-vente et la compétitivité des prix. "
+        "Cette approche permet de sécuriser l’exploitation et de favoriser l’intégration locale du projet."
+    )
+    default_commercialisation = (
+        "La stratégie commerciale s’appuie sur une approche mixte B2C et B2B : vente directe aux visiteurs, réservations en ligne, "
+        "partenariats avec hôtels, agences de voyages, guides, transporteurs touristiques et acteurs locaux. La politique tarifaire sera modulée "
+        "selon la saison, la taille des groupes, les offres packagées et les partenariats, afin d’optimiser le taux d’occupation et la rentabilité."
+    )
+    default_differenciation = (
+        "Le projet se différencie par la qualité de l’expérience proposée, la structuration de l’offre, la sécurité des prestations, "
+        "l’ancrage régional, la proximité avec la clientèle touristique et la capacité à nouer des partenariats avec les acteurs locaux. "
+        "Il vise à proposer une offre d’animation professionnelle, accessible et complémentaire à l’offre touristique existante."
+    )
+    default_attractivite = (
+        "Le projet contribue au renforcement de l’attractivité touristique de la destination Maroc en diversifiant les activités de loisirs, "
+        "en améliorant l’expérience des visiteurs et en favorisant la création d’emplois locaux directs et indirects. Il participe également à "
+        "l’allongement du temps passé sur la destination et à la valorisation de l’écosystème touristique régional."
+    )
+
+    if is_empty(context.get("synthese_etude_marche")):
+        context["synthese_etude_marche"] = projet.get("synthese_etude_marche") or default_synthese_marche
+
+    if is_empty(context.get("strategie_approvisionnement")):
+        context["strategie_approvisionnement"] = default_approvisionnement
+    elif isinstance(context.get("strategie_approvisionnement"), dict) and is_empty(context["strategie_approvisionnement"].get("description")):
+        context["strategie_approvisionnement"]["description"] = default_approvisionnement
+
+    if is_empty(context.get("strategie_commerciale")):
+        context["strategie_commerciale"] = default_commercialisation
+    elif isinstance(context.get("strategie_commerciale"), dict) and is_empty(context["strategie_commerciale"].get("description")):
+        context["strategie_commerciale"]["description"] = default_commercialisation
+
+    if is_empty(context.get("facteurs_differenciation")):
+        context["facteurs_differenciation"] = projet.get("facteurs_differenciation") or default_differenciation
+    if is_empty(projet.get("facteurs_differenciation")):
+        projet["facteurs_differenciation"] = context["facteurs_differenciation"]
+
+    if is_empty(context.get("attractivite_touristique")):
+        context["attractivite_touristique"] = projet.get("attractivite_touristique") or default_attractivite
+    if is_empty(projet.get("attractivite_touristique")):
+        projet["attractivite_touristique"] = context["attractivite_touristique"]
 
     return context
 
@@ -1818,36 +1865,163 @@ def apply_dap_default_mappings(doc, context):
             fill_cell_next_to_label(doc, item["label"], value)
 
 
-def apply_dap_narrative_fallbacks(doc, context):
-    narrative_rules = [
-        {
-            "search": "Synthétiser l’étude de marché réalisée",
-            "value": get_context_value(context, "synthese_etude_marche", ""),
-        },
-        {
-            "search": "Décrire brièvement les facteurs de différenciation",
-            "value": get_context_value(context, "facteurs_differenciation", ""),
-        },
-        {
-            "search": "Décrire succinctement l’attractivité touristique estimée",
-            "value": get_context_value(context, "attractivite_touristique", ""),
-        },
-    ]
+def _narrative_to_text(value, fallback=""):
+    """Transforme une valeur narrative reçue en texte exploitable dans le DAP."""
+    if value in [None, "", [], {}]:
+        return fallback
 
-    for rule in narrative_rules:
-        search_norm = normalize_label(rule["search"])
-        value = rule["value"]
+    if isinstance(value, dict):
+        for key in ["description", "texte", "synthese", "contenu", "commentaire"]:
+            if value.get(key) not in [None, "", [], {}]:
+                return str(value[key])
+        parts = [str(v) for v in value.values() if v not in [None, "", [], {}]]
+        return " ".join(parts) if parts else fallback
 
-        if not value:
+    if isinstance(value, list):
+        parts = [str(v) for v in value if v not in [None, "", [], {}]]
+        return " ".join(parts) if parts else fallback
+
+    return str(value)
+
+
+def _replace_first_paragraph_containing(doc, needles, value):
+    """Remplace le premier paragraphe qui contient l'une des expressions cibles."""
+    value = _narrative_to_text(value, "")
+    if not value:
+        return False
+
+    if isinstance(needles, str):
+        needles = [needles]
+
+    normalized_needles = [normalize_label(n) for n in needles]
+
+    for paragraph in iter_all_paragraphs(doc):
+        try:
+            txt = normalize_label(paragraph.text)
+            if any(n and n in txt for n in normalized_needles):
+                paragraph.text = value
+                return True
+        except Exception:
             continue
 
-        for paragraph in iter_all_paragraphs(doc):
-            try:
-                if search_norm in normalize_label(paragraph.text):
-                    paragraph.text = value
-                    break
-            except Exception:
-                continue
+    return False
+
+
+def _blank_template_instruction_paragraphs(doc, needles):
+    """Supprime les paragraphes d'instructions du modèle DAP après insertion du texte narratif."""
+    normalized_needles = [normalize_label(n) for n in needles]
+
+    for paragraph in iter_all_paragraphs(doc):
+        try:
+            txt = normalize_label(paragraph.text)
+            if any(n and n in txt for n in normalized_needles):
+                paragraph.text = ""
+        except Exception:
+            continue
+
+
+def apply_dap_narrative_fallbacks(doc, context):
+    """
+    Remplit les champs narratifs du DAP même lorsque l'IA ne les transmet pas.
+    Important : n8n envoie parfois des chaînes vides, donc on ne dépend pas de setdefault().
+    """
+    default_synthese_marche = (
+        "Le projet s’inscrit dans un marché touristique régional en développement, porté par la reprise de la demande, "
+        "la diversification des expériences recherchées par les visiteurs et le besoin d’offres d’animation mieux structurées. "
+        "La clientèle ciblée est composée de touristes nationaux, de touristes étrangers, de familles, de groupes et de clients locaux. "
+        "L’offre proposée permet de renforcer l’attractivité de la destination, d’améliorer l’expérience client et de créer une complémentarité "
+        "avec les établissements d’hébergement, restaurants, agences de voyages et opérateurs touristiques locaux."
+    )
+    default_approvisionnement = (
+        "La stratégie d’approvisionnement repose sur la mobilisation de fournisseurs locaux et nationaux pour les équipements, consommables, "
+        "maintenance et prestations de support. L’entreprise privilégiera les achats sur devis et bons de commande, avec une sélection fondée "
+        "sur la qualité, la disponibilité, les délais de livraison, le service après-vente et la compétitivité des prix."
+    )
+    default_commercialisation = (
+        "La stratégie commerciale s’appuie sur une approche mixte B2C et B2B : vente directe aux visiteurs, réservations en ligne, "
+        "partenariats avec hôtels, agences de voyages, guides, transporteurs touristiques et acteurs locaux. La politique tarifaire sera modulée "
+        "selon la saison, la taille des groupes, les offres packagées et les partenariats."
+    )
+    default_differenciation = (
+        "Le projet se différencie par la qualité de l’expérience proposée, la structuration de l’offre, la sécurité des prestations, "
+        "l’ancrage régional, la proximité avec la clientèle touristique et la capacité à nouer des partenariats avec les acteurs locaux."
+    )
+    default_attractivite = (
+        "Le projet contribue au renforcement de l’attractivité touristique de la destination Maroc en diversifiant les activités de loisirs, "
+        "en améliorant l’expérience des visiteurs et en favorisant la création d’emplois locaux directs et indirects. Il participe également "
+        "à l’allongement du temps passé sur la destination et à la valorisation de l’écosystème touristique régional."
+    )
+
+    synthese = _narrative_to_text(get_context_value(context, "synthese_etude_marche", ""), default_synthese_marche)
+    approvisionnement = _narrative_to_text(get_context_value(context, "strategie_approvisionnement", ""), default_approvisionnement)
+    commercialisation = _narrative_to_text(get_context_value(context, "strategie_commerciale", ""), default_commercialisation)
+    differenciation = _narrative_to_text(get_context_value(context, "facteurs_differenciation", ""), default_differenciation)
+    attractivite = _narrative_to_text(get_context_value(context, "attractivite_touristique", ""), default_attractivite)
+
+    _replace_first_paragraph_containing(
+        doc,
+        [
+            "Synthétiser l’étude de marché réalisée",
+            "Synthétiser l'étude de marché réalisée",
+            "Analyse de la demande",
+        ],
+        synthese,
+    )
+
+    _blank_template_instruction_paragraphs(
+        doc,
+        [
+            "Tendances d’évolution et taux de pénétration",
+            "Tendances d'evolution et taux de penetration",
+            "Evolution de la taille de marché",
+            "Drivers des ventes dans le marché de la demande",
+            "Un marché à très forte demande",
+            "Un marché très concurrencé",
+            "Autres (à préciser)",
+            "Analyse de l’offre",
+            "Analyser l’environnement du site d’implantation",
+            "Analyser l’offre future dans l’environnement immédiat",
+            "Adéquation de l’offre et de la demande",
+            "Analyser les principaux indicateurs d’adéquation",
+            "Contribution à l’Ecosystème du tourisme",
+        ],
+    )
+
+    _replace_first_paragraph_containing(
+        doc,
+        [
+            "Décrire brièvement les principales contraintes liées aux fournisseurs",
+            "Decrire brievement les principales contraintes liees aux fournisseurs",
+        ],
+        approvisionnement,
+    )
+
+    _replace_first_paragraph_containing(
+        doc,
+        [
+            "Décrire brièvement la stratégie commerciale",
+            "Decrire brievement la strategie commerciale",
+        ],
+        commercialisation,
+    )
+
+    _replace_first_paragraph_containing(
+        doc,
+        [
+            "Décrire brièvement les facteurs de différenciation",
+            "Decrire brievement les facteurs de differenciation",
+        ],
+        differenciation,
+    )
+
+    _replace_first_paragraph_containing(
+        doc,
+        [
+            "Décrire succinctement l’attractivité touristique estimée",
+            "Decrire succinctement l’attractivite touristique estimee",
+        ],
+        attractivite,
+    )
 
 
 def apply_dap_mapping_file(doc, context):
