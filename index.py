@@ -5,6 +5,7 @@ from openpyxl import load_workbook
 from pathlib import Path
 from jinja2 import Environment, ChainableUndefined
 from docx import Document
+from docx.table import _Cell
 import tempfile
 import zipfile
 import uuid
@@ -28,6 +29,7 @@ if BASE_DIR is None:
 
 TEMPLATE_DIR = BASE_DIR / "templates"
 MAPPING_DIR = BASE_DIR / "mappings"
+
 DOCX_JINJA_ENV = Environment(undefined=ChainableUndefined)
 
 
@@ -43,11 +45,13 @@ def as_dict(value):
 
 def deep_get(data, path, default=""):
     current = data
+
     for part in str(path).split("."):
         if isinstance(current, dict):
             current = current.get(part, default)
         else:
             return default
+
     return current if current is not None else default
 
 
@@ -58,7 +62,8 @@ def to_number(value):
     if isinstance(value, (int, float)):
         return value
 
-    text = str(value).strip().replace(" ", "").replace("\u00a0", "").replace(",", ".")
+    text = str(value).strip()
+    text = text.replace(" ", "").replace("\u00a0", "").replace(",", ".")
 
     if text.endswith("%"):
         try:
@@ -254,15 +259,24 @@ def add_docx_defaults(context):
 
     context["projet"].setdefault("objectif", context["projet"].get("objet", ""))
     context["projet"].setdefault("description", context["projet"].get("objet", ""))
-    context["projet"].setdefault("investissement_total_mad", context["projet"].get("investissement_total", 0))
+    context["projet"].setdefault(
+        "investissement_total_mad",
+        context["projet"].get("investissement_total", 0)
+    )
     context["projet"].setdefault("adresse_site", context["projet"].get("adresse_installations", ""))
     context["projet"].setdefault("secteur", context["projet"].get("branche_activite", ""))
 
     context["banque"].setdefault("banque_partenaire", context["banque"].get("nom", ""))
-    context["banque"].setdefault("forme_juridique", context["banque"].get("forme_juridique_banque", "Société Anonyme"))
+    context["banque"].setdefault(
+        "forme_juridique",
+        context["banque"].get("forme_juridique_banque", "Société Anonyme")
+    )
     context["banque"].setdefault(
         "capital",
-        context["banque"].get("capital_social", context["banque"].get("capital_social_banque", ""))
+        context["banque"].get(
+            "capital_social",
+            context["banque"].get("capital_social_banque", "")
+        )
     )
     context["banque"].setdefault("siege", context["banque"].get("siege_social", ""))
 
@@ -289,6 +303,10 @@ def add_docx_defaults(context):
 
     return context
 
+
+# =========================================================
+# EXCEL / BP
+# =========================================================
 
 def write_cell(ws, cell_ref, value, value_type="text"):
     cell = ws[cell_ref]
@@ -405,6 +423,38 @@ def apply_table_mappings(wb, context, table_mappings):
                 write_cell(ws, cell_ref, value, value_type)
 
 
+def render_bp_excel(output_path, context):
+    template_path = TEMPLATE_DIR / "BP_template.xlsx"
+    mapping_path = MAPPING_DIR / "mapping_bp_istitmar.json"
+
+    if not template_path.exists():
+        raise FileNotFoundError("Template Excel introuvable : templates/BP_template.xlsx")
+
+    if not mapping_path.exists():
+        raise FileNotFoundError("Mapping BP introuvable : mappings/mapping_bp_istitmar.json")
+
+    with open(mapping_path, "r", encoding="utf-8") as f:
+        mapping = json.load(f)
+
+    wb = load_workbook(template_path)
+
+    apply_simple_mappings(wb, context, mapping.get("scalar_mappings", []))
+    apply_simple_mappings(wb, context, mapping.get("financement_pi_mappings", []))
+    apply_table_mappings(wb, context, mapping.get("table_mappings", []))
+    apply_simple_mappings(wb, context, mapping.get("cpc_mappings", []))
+    apply_simple_mappings(wb, context, mapping.get("bilan_mappings", []))
+    apply_simple_mappings(wb, context, mapping.get("impacts_mappings", []))
+
+    wb.calculation.fullCalcOnLoad = True
+    wb.calculation.forceFullCalc = True
+
+    wb.save(output_path)
+
+
+# =========================================================
+# WORD / DAP ROBUSTE
+# =========================================================
+
 def normalize_label(text):
     text = str(text or "").lower().replace("\n", " ")
     text = re.sub(r"\s+", " ", text)
@@ -412,8 +462,34 @@ def normalize_label(text):
     return text.strip()
 
 
+def safe_table_rows(table):
+    try:
+        return list(table.rows)
+    except Exception:
+        return []
+
+
+def safe_row_cells(row, table):
+    """
+    Corrige l'erreur python-docx :
+    no tc element at grid_offset=0
+
+    Cette erreur arrive dans les tableaux Word avec cellules fusionnées.
+    """
+    try:
+        return list(row.cells)
+    except Exception:
+        try:
+            return [_Cell(tc, table) for tc in row._tr.tc_lst]
+        except Exception:
+            return []
+
+
 def set_cell_value(cell, value):
-    cell.text = "" if value is None else str(value)
+    try:
+        cell.text = "" if value is None else str(value)
+    except Exception:
+        pass
 
 
 def fill_cell_next_to_label(doc, label, value, position="right", occurrence=1):
@@ -421,17 +497,29 @@ def fill_cell_next_to_label(doc, label, value, position="right", occurrence=1):
     seen = 0
 
     for table in doc.tables:
-        for r_idx, row in enumerate(table.rows):
-            for c_idx, cell in enumerate(row.cells):
-                if wanted and wanted in normalize_label(cell.text):
+        rows = safe_table_rows(table)
+
+        for r_idx, row in enumerate(rows):
+            cells = safe_row_cells(row, table)
+
+            for c_idx, cell in enumerate(cells):
+                try:
+                    cell_text = normalize_label(cell.text)
+                except Exception:
+                    continue
+
+                if wanted and wanted in cell_text:
                     seen += 1
 
                     if seen < occurrence:
                         continue
 
-                    if position == "below" and r_idx + 1 < len(table.rows):
-                        set_cell_value(table.rows[r_idx + 1].cells[c_idx], value)
-                        return True
+                    if position == "below" and r_idx + 1 < len(rows):
+                        below_cells = safe_row_cells(rows[r_idx + 1], table)
+
+                        if c_idx < len(below_cells):
+                            set_cell_value(below_cells[c_idx], value)
+                            return True
 
                     offset = 1
 
@@ -441,10 +529,10 @@ def fill_cell_next_to_label(doc, label, value, position="right", occurrence=1):
                         except Exception:
                             offset = 1
 
-                    target_index = min(c_idx + offset, len(row.cells) - 1)
+                    target_index = c_idx + offset
 
-                    if target_index != c_idx:
-                        set_cell_value(row.cells[target_index], value)
+                    if target_index < len(cells):
+                        set_cell_value(cells[target_index], value)
                         return True
 
     return False
@@ -454,14 +542,108 @@ def replace_text_everywhere(doc, search, replace):
     replace = "" if replace is None else str(replace)
 
     for paragraph in doc.paragraphs:
-        if search in paragraph.text:
-            paragraph.text = paragraph.text.replace(search, replace)
+        try:
+            if search in paragraph.text:
+                paragraph.text = paragraph.text.replace(search, replace)
+        except Exception:
+            continue
 
     for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                if search in cell.text:
-                    cell.text = cell.text.replace(search, replace)
+        rows = safe_table_rows(table)
+
+        for row in rows:
+            cells = safe_row_cells(row, table)
+
+            for cell in cells:
+                try:
+                    if search in cell.text:
+                        cell.text = cell.text.replace(search, replace)
+                except Exception:
+                    continue
+
+
+def find_docx_table(doc, anchor_label):
+    anchor = normalize_label(anchor_label)
+
+    for table in doc.tables:
+        texts = []
+        rows = safe_table_rows(table)
+
+        for row in rows:
+            cells = safe_row_cells(row, table)
+
+            for cell in cells:
+                try:
+                    texts.append(cell.text)
+                except Exception:
+                    continue
+
+        table_text = normalize_label(" ".join(texts))
+
+        if anchor in table_text:
+            return table
+
+    return None
+
+
+def apply_docx_table_mappings(doc, context, table_mappings):
+    for mapping in table_mappings:
+        table_label = mapping.get("table_label") or mapping.get("anchor_label") or mapping.get("label")
+        source_array = mapping.get("source_array", "")
+        columns = mapping.get("columns", [])
+        start_row = mapping.get("start_row", mapping.get("start_row_index", 0))
+
+        if not table_label or not source_array or not columns:
+            continue
+
+        table = find_docx_table(doc, table_label)
+
+        if table is None:
+            continue
+
+        try:
+            start_idx = int(start_row)
+        except Exception:
+            start_idx = 0
+
+        if mapping.get("one_based", True) and start_idx > 0:
+            start_idx -= 1
+
+        rows_data = deep_get(context, source_array, [])
+
+        if not isinstance(rows_data, list):
+            continue
+
+        rows = safe_table_rows(table)
+
+        for i, row_data in enumerate(rows_data):
+            r = start_idx + i
+
+            if r >= len(rows):
+                break
+
+            cells = safe_row_cells(rows[r], table)
+
+            for col in columns:
+                idx = col.get("index", col.get("column_index", col.get("col")))
+                field = col.get("field")
+
+                if idx is None or field is None:
+                    continue
+
+                try:
+                    idx = int(idx)
+                except Exception:
+                    continue
+
+                if idx < 0 or idx >= len(cells):
+                    continue
+
+                try:
+                    value = row_data.get(field, "")
+                    set_cell_value(cells[idx], value)
+                except Exception:
+                    continue
 
 
 def apply_dap_default_mappings(doc, context):
@@ -527,71 +709,6 @@ def apply_dap_default_mappings(doc, context):
 
     for label, mark in checkbox_values.items():
         replace_text_everywhere(doc, f"☐ {label}", f"{mark} {label}")
-
-
-def find_docx_table(doc, anchor_label):
-    anchor = normalize_label(anchor_label)
-
-    for table in doc.tables:
-        text = normalize_label(" ".join(cell.text for row in table.rows for cell in row.cells))
-
-        if anchor in text:
-            return table
-
-    return None
-
-
-def apply_docx_table_mappings(doc, context, table_mappings):
-    for mapping in table_mappings:
-        table_label = mapping.get("table_label") or mapping.get("anchor_label") or mapping.get("label")
-        source_array = mapping.get("source_array", "")
-        columns = mapping.get("columns", [])
-        start_row = mapping.get("start_row", mapping.get("start_row_index", 0))
-
-        if not table_label or not source_array or not columns:
-            continue
-
-        table = find_docx_table(doc, table_label)
-
-        if table is None:
-            continue
-
-        try:
-            start_idx = int(start_row)
-        except Exception:
-            start_idx = 0
-
-        if mapping.get("one_based", True) and start_idx > 0:
-            start_idx -= 1
-
-        rows_data = deep_get(context, source_array, [])
-
-        if not isinstance(rows_data, list):
-            continue
-
-        for i, row_data in enumerate(rows_data):
-            r = start_idx + i
-
-            if r >= len(table.rows):
-                break
-
-            for col in columns:
-                idx = col.get("index", col.get("column_index", col.get("col")))
-                field = col.get("field")
-
-                if idx is None or field is None:
-                    continue
-
-                try:
-                    idx = int(idx)
-                except Exception:
-                    continue
-
-                if idx < 0 or idx >= len(table.rows[r].cells):
-                    continue
-
-                value = row_data.get(field, "")
-                set_cell_value(table.rows[r].cells[idx], value)
 
 
 def apply_dap_mapping_file(doc, context):
@@ -692,33 +809,9 @@ def render_docx(template_name, output_path, context):
     doc.save(str(output_path))
 
 
-def render_bp_excel(output_path, context):
-    template_path = TEMPLATE_DIR / "BP_template.xlsx"
-    mapping_path = MAPPING_DIR / "mapping_bp_istitmar.json"
-
-    if not template_path.exists():
-        raise FileNotFoundError("Template Excel introuvable : templates/BP_template.xlsx")
-
-    if not mapping_path.exists():
-        raise FileNotFoundError("Mapping BP introuvable : mappings/mapping_bp_istitmar.json")
-
-    with open(mapping_path, "r", encoding="utf-8") as f:
-        mapping = json.load(f)
-
-    wb = load_workbook(template_path)
-
-    apply_simple_mappings(wb, context, mapping.get("scalar_mappings", []))
-    apply_simple_mappings(wb, context, mapping.get("financement_pi_mappings", []))
-    apply_table_mappings(wb, context, mapping.get("table_mappings", []))
-    apply_simple_mappings(wb, context, mapping.get("cpc_mappings", []))
-    apply_simple_mappings(wb, context, mapping.get("bilan_mappings", []))
-    apply_simple_mappings(wb, context, mapping.get("impacts_mappings", []))
-
-    wb.calculation.fullCalcOnLoad = True
-    wb.calculation.forceFullCalc = True
-
-    wb.save(output_path)
-
+# =========================================================
+# ROUTES
+# =========================================================
 
 @app.get("/")
 def root():
