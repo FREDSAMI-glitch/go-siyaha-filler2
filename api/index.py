@@ -4,21 +4,18 @@ from docxtpl import DocxTemplate
 from openpyxl import load_workbook
 from pathlib import Path
 from jinja2 import Environment, ChainableUndefined
+from docx import Document
 import tempfile
 import zipfile
 import uuid
 import json
 import re
+import copy
 
 app = FastAPI()
 
 API_DIR = Path(__file__).resolve().parent
-
-# Fonction robuste : marche si index.py est dans /api ou à la racine
-POSSIBLE_BASE_DIRS = [
-    API_DIR,
-    API_DIR.parent,
-]
+POSSIBLE_BASE_DIRS = [API_DIR, API_DIR.parent]
 
 BASE_DIR = None
 for d in POSSIBLE_BASE_DIRS:
@@ -31,8 +28,6 @@ if BASE_DIR is None:
 
 TEMPLATE_DIR = BASE_DIR / "templates"
 MAPPING_DIR = BASE_DIR / "mappings"
-
-# Jinja sécurisé : si une variable manque dans un Word, elle devient vide au lieu de bloquer l'API
 DOCX_JINJA_ENV = Environment(undefined=ChainableUndefined)
 
 
@@ -63,9 +58,7 @@ def to_number(value):
     if isinstance(value, (int, float)):
         return value
 
-    text = str(value).strip()
-    text = text.replace(" ", "").replace("\u00a0", "")
-    text = text.replace(",", ".")
+    text = str(value).strip().replace(" ", "").replace("\u00a0", "").replace(",", ".")
 
     if text.endswith("%"):
         try:
@@ -88,16 +81,14 @@ def normalize_value(value, value_type="text"):
     if value_type == "boolean":
         return bool(value)
 
+    if value_type == "money":
+        n = to_number(value)
+        return f"{n:,.0f}".replace(",", " ")
+
     return value if value is not None else ""
 
 
 def add_docx_defaults(context):
-    """
-    Évite les erreurs docxtpl/Jinja du type :
-    'dict object' has no attribute 'attestation_classement'
-
-    Les champs absents deviennent vides.
-    """
     context.setdefault("dossier", {})
     context.setdefault("entreprise", {})
     context.setdefault("dirigeant", {})
@@ -108,16 +99,21 @@ def add_docx_defaults(context):
     context.setdefault("financement_pi", {})
     context.setdefault("financement_expert", {})
     context.setdefault("hypotheses_financieres", {})
+    context.setdefault("financement_checkbox", {})
 
-    context["dossier"] = as_dict(context.get("dossier"))
-    context["entreprise"] = as_dict(context.get("entreprise"))
-    context["dirigeant"] = as_dict(context.get("dirigeant"))
-    context["projet"] = as_dict(context.get("projet"))
-    context["banque"] = as_dict(context.get("banque"))
-    context["emplois"] = as_dict(context.get("emplois"))
-    context["financement_pi"] = as_dict(context.get("financement_pi"))
-    context["financement_expert"] = as_dict(context.get("financement_expert"))
-    context["hypotheses_financieres"] = as_dict(context.get("hypotheses_financieres"))
+    for key in [
+        "dossier",
+        "entreprise",
+        "dirigeant",
+        "projet",
+        "banque",
+        "emplois",
+        "financement_pi",
+        "financement_expert",
+        "hypotheses_financieres",
+        "financement_checkbox",
+    ]:
+        context[key] = as_dict(context.get(key))
 
     common_defaults = {
         "identifiant": "",
@@ -126,7 +122,6 @@ def add_docx_defaults(context):
         "date_signature": "",
         "numero_dossier": "",
         "programme": "GO SIYAHA",
-        "appel_a_manifestation": "",
 
         "raison_sociale": "",
         "denomination": "",
@@ -143,14 +138,21 @@ def add_docx_defaults(context):
         "telephone": "",
         "tel": "",
         "email": "",
+        "site_web": "",
         "capital_social": "",
         "capital_social_mad": 0,
+        "actionnaires": "",
         "activite": "",
+        "activite_selection": "",
+        "activite_autre": "",
         "activite_detaillee": "",
         "objet_social": "",
         "attestation_classement": "",
         "classement": "",
         "categorie_classement": "",
+        "type_categorie": "",
+        "secteur": "",
+        "secteur_activite": "",
 
         "nom": "",
         "prenom": "",
@@ -159,19 +161,30 @@ def add_docx_defaults(context):
         "fonction": "",
         "mobile": "",
         "gsm": "",
+        "telephone_fixe": "",
+        "profil": "",
+        "affaires_gerees": "",
 
         "objet": "",
+        "objectif": "",
         "description": "",
         "ville_region": "",
         "region": "",
         "province": "",
         "commune": "",
+        "adresse_installations": "",
+        "adresse_site": "",
         "lieu_realisation": "",
         "coordonnees_gps": "",
         "latitude": "",
         "longitude": "",
         "branche_activite": "",
-        "secteur": "",
+        "filieres": "",
+        "ecosystemes": "",
+        "activites_envisagees": "",
+        "offre_animation": "",
+        "fiches_projet": "",
+        "autorisations": "",
         "biens_services_produits": "",
         "investissement_total": 0,
         "investissement_total_mad": 0,
@@ -180,16 +193,22 @@ def add_docx_defaults(context):
         "nature_terrain": "",
         "titre_foncier": "",
         "statut_foncier": "",
+        "surface_mode_occupation": "",
         "planning_realisation": "",
         "date_demarrage_prevue": "",
         "annee_demarrage": "",
+        "responsable_projet": "",
+        "responsable_mobile": "",
         "role_region": "",
         "role_balance_commerciale": "",
-        "substitution_importations": "",
-        "developpement_export": "",
 
         "banque_partenaire": "",
         "banque": "",
+        "forme_juridique_banque": "",
+        "capital": "",
+        "capital_social_banque": "",
+        "siege": "",
+        "siege_social": "",
         "fonds_propres": 0,
         "credit_bancaire": 0,
         "cmt": 0,
@@ -198,8 +217,6 @@ def add_docx_defaults(context):
         "prime": 0,
         "prime_istitmar": 0,
         "montant_prime": 0,
-        "apport_fonds_propres": 0,
-        "part_fonds_propres": 0,
         "mode_financement": "",
 
         "emplois_directs": "",
@@ -230,11 +247,45 @@ def add_docx_defaults(context):
     context["entreprise"].setdefault("numero_rc", context["entreprise"].get("rc", ""))
     context["entreprise"].setdefault("denomination", context["entreprise"].get("raison_sociale", ""))
     context["entreprise"].setdefault("adresse", context["entreprise"].get("adresse_siege", ""))
+    context["entreprise"].setdefault("secteur_activite", context["entreprise"].get("activite", ""))
+
     context["dirigeant"].setdefault("fonction", context["dirigeant"].get("qualite", ""))
     context["dirigeant"].setdefault("gsm", context["dirigeant"].get("mobile", ""))
+
+    context["projet"].setdefault("objectif", context["projet"].get("objet", ""))
     context["projet"].setdefault("description", context["projet"].get("objet", ""))
     context["projet"].setdefault("investissement_total_mad", context["projet"].get("investissement_total", 0))
+    context["projet"].setdefault("adresse_site", context["projet"].get("adresse_installations", ""))
+    context["projet"].setdefault("secteur", context["projet"].get("branche_activite", ""))
+
     context["banque"].setdefault("banque_partenaire", context["banque"].get("nom", ""))
+    context["banque"].setdefault("forme_juridique", context["banque"].get("forme_juridique_banque", "Société Anonyme"))
+    context["banque"].setdefault(
+        "capital",
+        context["banque"].get("capital_social", context["banque"].get("capital_social_banque", ""))
+    )
+    context["banque"].setdefault("siege", context["banque"].get("siege_social", ""))
+
+    mode = context["projet"].get("mode_financement", {})
+
+    if isinstance(mode, dict):
+        fonds = to_number(mode.get("fonds_propres", mode.get("autofinancement", 0)))
+        cmt = to_number(mode.get("credit_bancaire", mode.get("cmt", 0)))
+        fp = to_number(mode.get("financement_participatif", 0))
+        cf = to_number(mode.get("credit_fournisseur", 0))
+        leasing = to_number(mode.get("leasing", 0))
+    else:
+        fonds = to_number(context["financement_expert"].get("fonds_propres_mad", 0))
+        cmt = to_number(context["financement_expert"].get("credit_bancaire_mad", 0))
+        fp = to_number(context["financement_expert"].get("financement_participatif_mad", 0))
+        cf = to_number(context["financement_expert"].get("credit_fournisseur_mad", 0))
+        leasing = to_number(context["financement_expert"].get("leasing_mad", 0))
+
+    context["financement_checkbox"].setdefault("autofinancement", "☑" if fonds > 0 else "☐")
+    context["financement_checkbox"].setdefault("cmt", "☑" if cmt > 0 else "☐")
+    context["financement_checkbox"].setdefault("financement_participatif", "☑" if fp > 0 else "☐")
+    context["financement_checkbox"].setdefault("credit_fournisseur", "☑" if cf > 0 else "☐")
+    context["financement_checkbox"].setdefault("leasing", "☑" if leasing > 0 else "☐")
 
     return context
 
@@ -242,7 +293,6 @@ def add_docx_defaults(context):
 def write_cell(ws, cell_ref, value, value_type="text"):
     cell = ws[cell_ref]
 
-    # Ne jamais écraser une formule Excel
     if isinstance(cell.value, str) and cell.value.startswith("="):
         return
 
@@ -329,7 +379,6 @@ def apply_table_mappings(wb, context, table_mappings):
             continue
 
         ws = wb[sheet_name]
-
         source_key = source_array.split(".")[-1]
         rows = investissements.get(source_key, [])
 
@@ -356,13 +405,287 @@ def apply_table_mappings(wb, context, table_mappings):
                 write_cell(ws, cell_ref, value, value_type)
 
 
+def normalize_label(text):
+    text = str(text or "").lower().replace("\n", " ")
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"[^\wÀ-ÿ%()./ -]", "", text)
+    return text.strip()
+
+
+def set_cell_value(cell, value):
+    cell.text = "" if value is None else str(value)
+
+
+def fill_cell_next_to_label(doc, label, value, position="right", occurrence=1):
+    wanted = normalize_label(label)
+    seen = 0
+
+    for table in doc.tables:
+        for r_idx, row in enumerate(table.rows):
+            for c_idx, cell in enumerate(row.cells):
+                if wanted and wanted in normalize_label(cell.text):
+                    seen += 1
+
+                    if seen < occurrence:
+                        continue
+
+                    if position == "below" and r_idx + 1 < len(table.rows):
+                        set_cell_value(table.rows[r_idx + 1].cells[c_idx], value)
+                        return True
+
+                    offset = 1
+
+                    if isinstance(position, str) and position.startswith("right"):
+                        try:
+                            offset = int(position.replace("right", "") or "1")
+                        except Exception:
+                            offset = 1
+
+                    target_index = min(c_idx + offset, len(row.cells) - 1)
+
+                    if target_index != c_idx:
+                        set_cell_value(row.cells[target_index], value)
+                        return True
+
+    return False
+
+
+def replace_text_everywhere(doc, search, replace):
+    replace = "" if replace is None else str(replace)
+
+    for paragraph in doc.paragraphs:
+        if search in paragraph.text:
+            paragraph.text = paragraph.text.replace(search, replace)
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                if search in cell.text:
+                    cell.text = cell.text.replace(search, replace)
+
+
+def apply_dap_default_mappings(doc, context):
+    default_mappings = [
+        {"label": "Identifiant", "field": "dossier.identifiant"},
+        {"label": "Raison sociale", "field": "entreprise.raison_sociale"},
+        {"label": "Forme juridique", "field": "entreprise.forme_juridique"},
+        {"label": "Date de création", "field": "entreprise.date_creation"},
+        {"label": "Secteur d’activité", "field": "entreprise.activite"},
+        {"label": "Type et Catégorie", "field": "entreprise.type_categorie"},
+        {"label": "Attestation de classement", "field": "entreprise.attestation_classement"},
+        {"label": "Capital social (MAD)", "field": "entreprise.capital_social_mad"},
+        {"label": "Actionnaires (%)", "field": "entreprise.actionnaires"},
+        {"label": "Registre de commerce", "field": "entreprise.rc"},
+        {"label": "Identifiant Commun de l'Entreprise", "field": "entreprise.ice"},
+        {"label": "CNSS", "field": "entreprise.cnss"},
+        {"label": "Adresse du siège social", "field": "entreprise.adresse_siege"},
+        {"label": "Adresse du site d’implantation", "field": "projet.adresse_site"},
+        {"label": "Site Web", "field": "entreprise.site_web"},
+        {"label": "Tél.", "field": "entreprise.telephone", "occurrence": 1},
+
+        {"label": "Dirigeant", "field": "dirigeant.nom"},
+        {"label": "Profil", "field": "dirigeant.profil"},
+        {"label": "Affaire(s) gérée(s) par le dirigeant", "field": "dirigeant.affaires_gerees"},
+        {"label": "Mobile (Cellulaire)", "field": "dirigeant.mobile", "occurrence": 1},
+        {"label": "Fixe (Tél.)", "field": "dirigeant.telephone_fixe"},
+        {"label": "Courrier électronique", "field": "dirigeant.email"},
+
+        {"label": "Filière(s) du projet", "field": "projet.filieres"},
+        {"label": "Objet du projet", "field": "projet.objet"},
+        {"label": "Adresse des installations", "field": "projet.adresse_installations"},
+        {"label": "Ville/Région du Projet", "field": "projet.ville_region"},
+        {"label": "Superficie et mode d’occupation du site", "field": "projet.surface_mode_occupation"},
+        {"label": "Effectif à embaucher", "field": "projet.effectif"},
+        {"label": "Planning de réalisation", "field": "projet.planning_realisation"},
+        {"label": "Date prévue de démarrage", "field": "projet.date_demarrage_prevue"},
+        {"label": "Responsable de projet", "field": "projet.responsable_projet"},
+        {"label": "Mobile (Cellulaire) du resp. de projet", "field": "projet.responsable_mobile"},
+        {"label": "Partenaire financier", "field": "banque.nom"},
+        {"label": "Investissement total", "field": "projet.investissement_total"},
+        {"label": "Secteur d’activité du projet", "field": "projet.secteur"},
+    ]
+
+    for item in default_mappings:
+        value = deep_get(context, item["field"], "")
+
+        if value not in ["", None, 0]:
+            fill_cell_next_to_label(
+                doc,
+                item["label"],
+                value,
+                item.get("position", "right"),
+                int(item.get("occurrence", 1)),
+            )
+
+    checkbox_values = {
+        "Autofinancement": deep_get(context, "financement_checkbox.autofinancement", "☐"),
+        "CMT": deep_get(context, "financement_checkbox.cmt", "☐"),
+        "Financement participatif": deep_get(context, "financement_checkbox.financement_participatif", "☐"),
+        "Crédit fournisseur": deep_get(context, "financement_checkbox.credit_fournisseur", "☐"),
+        "Leasing": deep_get(context, "financement_checkbox.leasing", "☐"),
+    }
+
+    for label, mark in checkbox_values.items():
+        replace_text_everywhere(doc, f"☐ {label}", f"{mark} {label}")
+
+
+def find_docx_table(doc, anchor_label):
+    anchor = normalize_label(anchor_label)
+
+    for table in doc.tables:
+        text = normalize_label(" ".join(cell.text for row in table.rows for cell in row.cells))
+
+        if anchor in text:
+            return table
+
+    return None
+
+
+def apply_docx_table_mappings(doc, context, table_mappings):
+    for mapping in table_mappings:
+        table_label = mapping.get("table_label") or mapping.get("anchor_label") or mapping.get("label")
+        source_array = mapping.get("source_array", "")
+        columns = mapping.get("columns", [])
+        start_row = mapping.get("start_row", mapping.get("start_row_index", 0))
+
+        if not table_label or not source_array or not columns:
+            continue
+
+        table = find_docx_table(doc, table_label)
+
+        if table is None:
+            continue
+
+        try:
+            start_idx = int(start_row)
+        except Exception:
+            start_idx = 0
+
+        if mapping.get("one_based", True) and start_idx > 0:
+            start_idx -= 1
+
+        rows_data = deep_get(context, source_array, [])
+
+        if not isinstance(rows_data, list):
+            continue
+
+        for i, row_data in enumerate(rows_data):
+            r = start_idx + i
+
+            if r >= len(table.rows):
+                break
+
+            for col in columns:
+                idx = col.get("index", col.get("column_index", col.get("col")))
+                field = col.get("field")
+
+                if idx is None or field is None:
+                    continue
+
+                try:
+                    idx = int(idx)
+                except Exception:
+                    continue
+
+                if idx < 0 or idx >= len(table.rows[r].cells):
+                    continue
+
+                value = row_data.get(field, "")
+                set_cell_value(table.rows[r].cells[idx], value)
+
+
+def apply_dap_mapping_file(doc, context):
+    mapping_path = MAPPING_DIR / "mapping_dap_istitmar.json"
+
+    if not mapping_path.exists():
+        apply_dap_default_mappings(doc, context)
+        return
+
+    with open(mapping_path, "r", encoding="utf-8") as f:
+        mapping = json.load(f)
+
+    label_mappings = (
+        mapping.get("cell_mappings", [])
+        + mapping.get("label_mappings", [])
+        + mapping.get("field_mappings", [])
+    )
+
+    for item in label_mappings:
+        label = item.get("label") or item.get("search")
+        field = item.get("field")
+        position = item.get("position", "right")
+        occurrence = int(item.get("occurrence", 1))
+        value_type = item.get("type", "text")
+
+        if not label or not field:
+            continue
+
+        value = normalize_value(deep_get(context, field, ""), value_type)
+
+        if value in ["", None]:
+            continue
+
+        fill_cell_next_to_label(doc, label, value, position, occurrence)
+
+    for item in mapping.get("checkbox_mappings", []):
+        label = item.get("label")
+        field = item.get("field")
+
+        if not label or not field:
+            continue
+
+        mark = deep_get(context, field, "☐")
+        checked = mark is True or str(mark).strip() in ["☑", "true", "True", "1", "oui", "Oui"]
+
+        replace_text_everywhere(doc, f"☐ {label}", f"{'☑' if checked else '☐'} {label}")
+
+    for item in mapping.get("text_replacements", []) + mapping.get("literal_replacements", []):
+        search = item.get("search")
+        field = item.get("field")
+        replacement = item.get("replacement")
+
+        if not search:
+            continue
+
+        if field:
+            replacement = deep_get(context, field, "")
+
+        replace_text_everywhere(doc, search, replacement or "")
+
+    apply_docx_table_mappings(doc, context, mapping.get("table_mappings", []))
+    apply_dap_default_mappings(doc, context)
+
+
+def render_dap_with_mapping(output_path, context):
+    template_path = TEMPLATE_DIR / "DAP_template.docx"
+
+    if not template_path.exists():
+        raise FileNotFoundError("Template Word introuvable : DAP_template.docx")
+
+    safe_context = add_docx_defaults(copy.deepcopy(context))
+
+    tmp_docx = Path(tempfile.gettempdir()) / f"tmp_dap_{uuid.uuid4()}.docx"
+
+    doc_tpl = DocxTemplate(str(template_path))
+    doc_tpl.render(safe_context, jinja_env=DOCX_JINJA_ENV)
+    doc_tpl.save(str(tmp_docx))
+
+    doc = Document(str(tmp_docx))
+    apply_dap_mapping_file(doc, safe_context)
+    doc.save(str(output_path))
+
+
 def render_docx(template_name, output_path, context):
+    if template_name == "DAP_template.docx":
+        render_dap_with_mapping(output_path, context)
+        return
+
     template_path = TEMPLATE_DIR / template_name
 
     if not template_path.exists():
         raise FileNotFoundError(f"Template Word introuvable : {template_name}")
 
-    safe_context = add_docx_defaults(dict(context))
+    safe_context = add_docx_defaults(copy.deepcopy(context))
 
     doc = DocxTemplate(str(template_path))
     doc.render(safe_context, jinja_env=DOCX_JINJA_ENV)
@@ -391,7 +714,6 @@ def render_bp_excel(output_path, context):
     apply_simple_mappings(wb, context, mapping.get("bilan_mappings", []))
     apply_simple_mappings(wb, context, mapping.get("impacts_mappings", []))
 
-    # Excel recalculera les formules à l’ouverture
     wb.calculation.fullCalcOnLoad = True
     wb.calculation.forceFullCalc = True
 
@@ -415,14 +737,16 @@ def health():
         "status": "ok",
         "base_dir": str(BASE_DIR),
         "templates": {
-            "declaration_factures.docx": (TEMPLATE_DIR / "declaration_factures.docx").exists(),
             "DAP_template.docx": (TEMPLATE_DIR / "DAP_template.docx").exists(),
             "BP_template.xlsx": (TEMPLATE_DIR / "BP_template.xlsx").exists(),
-            "demande_honneur.docx": (TEMPLATE_DIR / "demande_honneur.docx").exists(),
-            "engagement_capacite.docx": (TEMPLATE_DIR / "engagement_capacite.docx").exists(),
+            "demande_participation.docx": (TEMPLATE_DIR / "demande_participation.docx").exists(),
+            "engagement_capacite_financiere.docx": (TEMPLATE_DIR / "engagement_capacite_financiere.docx").exists(),
+            "engagement_autorisations.docx": (TEMPLATE_DIR / "engagement_autorisations.docx").exists(),
+            "declaration_honneur_justificatifs.docx": (TEMPLATE_DIR / "declaration_honneur_justificatifs.docx").exists(),
         },
         "mappings": {
             "mapping_bp_istitmar.json": (MAPPING_DIR / "mapping_bp_istitmar.json").exists(),
+            "mapping_dap_istitmar.json": (MAPPING_DIR / "mapping_dap_istitmar.json").exists(),
         },
     }
 
@@ -433,11 +757,15 @@ async def fill(request: Request):
         payload = await request.json()
         data = payload.get("data", payload)
 
-        selected_template = (
-            payload.get("selected_template")
-            or data.get("selected_template")
-            or "dossier_complet"
-        )
+        selected_template = payload.get("selected_template") or data.get("selected_template") or "dossier_complet"
+
+        aliases = {
+            "demande_honneur": "declaration_honneur_justificatifs",
+            "engagement_capacite": "engagement_capacite_financiere",
+            "declaration_factures": "declaration_honneur_justificatifs",
+        }
+
+        selected_template = aliases.get(selected_template, selected_template)
 
         context = {
             **data,
@@ -458,6 +786,7 @@ async def fill(request: Request):
             "impacts_previsionnels": data.get("impacts_previsionnels", {}),
             "hypotheses_financieres": data.get("hypotheses_financieres", {}),
             "financement_expert": data.get("financement_expert", {}),
+            "financement_checkbox": data.get("financement_checkbox", {}),
         }
 
         context = add_docx_defaults(context)
@@ -491,29 +820,54 @@ async def fill(request: Request):
         elif selected_template == "dap_word":
             add_docx("DAP_template.docx", f"{identifiant}_{societe}_DAP.docx")
 
-        elif selected_template == "demande_honneur":
-            if (TEMPLATE_DIR / "demande_honneur.docx").exists():
-                add_docx("demande_honneur.docx", f"{identifiant}_{societe}_demande_honneur.docx")
-            else:
-                add_docx("declaration_factures.docx", f"{identifiant}_{societe}_declaration_factures.docx")
+        elif selected_template == "demande_participation":
+            add_docx("demande_participation.docx", f"{identifiant}_{societe}_demande_participation.docx")
 
-        elif selected_template == "engagement_capacite":
-            add_docx("engagement_capacite.docx", f"{identifiant}_{societe}_engagement_capacite.docx")
+        elif selected_template == "engagement_capacite_financiere":
+            add_docx(
+                "engagement_capacite_financiere.docx",
+                f"{identifiant}_{societe}_engagement_capacite_financiere.docx",
+            )
+
+        elif selected_template == "engagement_autorisations":
+            add_docx(
+                "engagement_autorisations.docx",
+                f"{identifiant}_{societe}_engagement_autorisations.docx",
+            )
+
+        elif selected_template == "declaration_honneur_justificatifs":
+            add_docx(
+                "declaration_honneur_justificatifs.docx",
+                f"{identifiant}_{societe}_declaration_honneur_justificatifs.docx",
+            )
 
         elif selected_template == "dossier_complet":
-            add_docx("declaration_factures.docx", f"{identifiant}_{societe}_declaration_factures.docx")
-
             if (TEMPLATE_DIR / "DAP_template.docx").exists():
                 add_docx("DAP_template.docx", f"{identifiant}_{societe}_DAP.docx")
 
             if (TEMPLATE_DIR / "BP_template.xlsx").exists():
                 add_bp()
 
-            if (TEMPLATE_DIR / "demande_honneur.docx").exists():
-                add_docx("demande_honneur.docx", f"{identifiant}_{societe}_demande_honneur.docx")
+            if (TEMPLATE_DIR / "demande_participation.docx").exists():
+                add_docx("demande_participation.docx", f"{identifiant}_{societe}_demande_participation.docx")
 
-            if (TEMPLATE_DIR / "engagement_capacite.docx").exists():
-                add_docx("engagement_capacite.docx", f"{identifiant}_{societe}_engagement_capacite.docx")
+            if (TEMPLATE_DIR / "engagement_capacite_financiere.docx").exists():
+                add_docx(
+                    "engagement_capacite_financiere.docx",
+                    f"{identifiant}_{societe}_engagement_capacite_financiere.docx",
+                )
+
+            if (TEMPLATE_DIR / "engagement_autorisations.docx").exists():
+                add_docx(
+                    "engagement_autorisations.docx",
+                    f"{identifiant}_{societe}_engagement_autorisations.docx",
+                )
+
+            if (TEMPLATE_DIR / "declaration_honneur_justificatifs.docx").exists():
+                add_docx(
+                    "declaration_honneur_justificatifs.docx",
+                    f"{identifiant}_{societe}_declaration_honneur_justificatifs.docx",
+                )
 
         else:
             return JSONResponse(
@@ -523,8 +877,10 @@ async def fill(request: Request):
                     "allowed": [
                         "bp_excel",
                         "dap_word",
-                        "demande_honneur",
-                        "engagement_capacite",
+                        "demande_participation",
+                        "engagement_capacite_financiere",
+                        "engagement_autorisations",
+                        "declaration_honneur_justificatifs",
                         "dossier_complet",
                     ],
                 },
