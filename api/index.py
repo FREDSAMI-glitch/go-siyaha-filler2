@@ -9,6 +9,7 @@ from docx import Document
 from docx.table import _Cell
 from docx.shared import Cm
 from docx.oxml.ns import qn
+from datetime import date
 import tempfile
 import zipfile
 import uuid
@@ -19,7 +20,16 @@ import copy
 app = FastAPI()
 
 API_DIR = Path(__file__).resolve().parent
-BASE_DIR = API_DIR.parent
+POSSIBLE_BASE_DIRS = [API_DIR, API_DIR.parent]
+
+BASE_DIR = None
+for d in POSSIBLE_BASE_DIRS:
+    if (d / "templates").exists() or (d / "mappings").exists():
+        BASE_DIR = d
+        break
+
+if BASE_DIR is None:
+    BASE_DIR = API_DIR.parent
 
 TEMPLATE_DIR = BASE_DIR / "templates"
 MAPPING_DIR = BASE_DIR / "mappings"
@@ -37,33 +47,21 @@ def safe_name(value):
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in str(value))
 
 
+def normalize_key_text(value):
+    text = str(value or "").lower()
+    text = text.replace("é", "e").replace("è", "e").replace("ê", "e")
+    text = text.replace("à", "a").replace("â", "a")
+    text = text.replace("ç", "c").replace("ï", "i").replace("î", "i")
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    return text.strip("_")
+
+
 def as_dict(value):
     return value if isinstance(value, dict) else {}
 
 
 def is_empty(value):
     return value is None or value == "" or value == [] or value == {}
-
-
-def find_file(filename):
-    possible_paths = [
-        TEMPLATE_DIR / filename,
-        MAPPING_DIR / filename,
-        BASE_DIR / filename,
-        API_DIR / filename,
-    ]
-
-    for path in possible_paths:
-        if path.exists():
-            return path
-
-    for folder in [TEMPLATE_DIR, MAPPING_DIR, BASE_DIR, API_DIR]:
-        if folder.exists():
-            for path in folder.rglob(filename):
-                if path.exists():
-                    return path
-
-    return None
 
 
 def deep_get(data, path, default=None):
@@ -74,7 +72,10 @@ def deep_get(data, path, default=None):
 
     for part in str(path).split("."):
         if isinstance(current, dict):
-            current = current.get(part, default)
+            if part in current:
+                current = current.get(part)
+            else:
+                return default
         elif isinstance(current, list):
             try:
                 current = current[int(part)]
@@ -84,6 +85,18 @@ def deep_get(data, path, default=None):
             return default
 
     return current if current is not None else default
+
+
+def deep_set(data, path, value):
+    parts = str(path).split(".")
+    current = data
+
+    for part in parts[:-1]:
+        if not isinstance(current.get(part), dict):
+            current[part] = {}
+        current = current[part]
+
+    current[parts[-1]] = value
 
 
 def get_context_value(context, path, default=""):
@@ -101,6 +114,14 @@ def get_context_value(context, path, default=""):
     return default
 
 
+def first_non_empty(context, paths, default=""):
+    for path in paths:
+        value = get_context_value(context, path, None)
+        if value not in [None, "", [], {}]:
+            return value
+    return default
+
+
 def parse_number(value):
     if value is None or value == "":
         return None
@@ -112,7 +133,14 @@ def parse_number(value):
         return value
 
     text = str(value).strip()
-    text = text.replace("\xa0", " ")
+    text = text.replace("\u00a0", " ")
+
+    if text.endswith("%"):
+        try:
+            return float(text.replace("%", "").replace(",", ".")) / 100
+        except Exception:
+            return None
+
     text = re.sub(r"[^\d,.\-]", "", text)
 
     if not text:
@@ -144,6 +172,26 @@ def to_number(value):
     return 0 if number is None else number
 
 
+def number_as_kmad(value, source_path=""):
+    number = to_number(value)
+    if not number:
+        return 0
+    if str(source_path).endswith("_kmad"):
+        return number
+    if abs(number) >= 100000:
+        return number / 1000
+    return number
+
+
+def number_as_mad(value, source_path=""):
+    number = to_number(value)
+    if not number:
+        return 0
+    if str(source_path).endswith("_kmad"):
+        return number * 1000
+    return number
+
+
 def format_display_value(value, fmt=None):
     if value is None:
         return ""
@@ -160,6 +208,12 @@ def format_display_value(value, fmt=None):
             return ""
         return f"{number:,.0f}".replace(",", " ") + " KMAD"
 
+    if fmt == "mmad_an":
+        number = to_number(value)
+        if number == 0:
+            return ""
+        return f"{number:,.1f}".replace(",", " ") + " MMAD/an"
+
     if fmt == "percent":
         number = to_number(value)
         if number == 0:
@@ -173,6 +227,72 @@ def format_display_value(value, fmt=None):
         return str(int(number)) if number == int(number) else str(number)
 
     return str(value)
+
+
+def find_file(filename):
+    possible_paths = [
+        TEMPLATE_DIR / filename,
+        MAPPING_DIR / filename,
+        BASE_DIR / filename,
+        API_DIR / filename,
+    ]
+
+    for path in possible_paths:
+        if path.exists():
+            return path
+
+    for folder in [TEMPLATE_DIR, MAPPING_DIR, BASE_DIR, API_DIR]:
+        if folder.exists():
+            for path in folder.rglob(filename):
+                if path.exists():
+                    return path
+
+    return None
+
+
+def normalize_list_value(value, allowed_values):
+    if is_empty(value):
+        return None
+
+    raw = str(value).strip()
+    raw_low = raw.lower()
+
+    for allowed in allowed_values:
+        if raw == allowed:
+            return allowed
+
+    for allowed in allowed_values:
+        if raw_low == str(allowed).lower():
+            return allowed
+
+    if "animation" in raw_low:
+        for allowed in allowed_values:
+            if "animation" in str(allowed).lower():
+                return allowed
+
+    if "restaurant" in raw_low or "restauration" in raw_low:
+        for allowed in allowed_values:
+            if "restaurant" in str(allowed).lower():
+                return allowed
+
+    if "hébergement" in raw_low or "hebergement" in raw_low or "hotel" in raw_low:
+        for allowed in allowed_values:
+            a = str(allowed).lower()
+            if "hébergement" in a or "hebergement" in a:
+                return allowed
+
+    if "création" in raw_low or "creation" in raw_low:
+        for allowed in allowed_values:
+            a = str(allowed).lower()
+            if "création" in a or "creation" in a:
+                return allowed
+
+    if "extension" in raw_low:
+        for allowed in allowed_values:
+            if "extension" in str(allowed).lower():
+                return allowed
+
+    return raw
 
 
 def normalize_excel_value(value, mapping_item, source_path=None, category=None):
@@ -198,7 +318,7 @@ def normalize_excel_value(value, mapping_item, source_path=None, category=None):
             return None
 
         if unit == "KMAD":
-            if source_path and source_path.endswith("_mad"):
+            if source_path and str(source_path).endswith("_mad"):
                 number = number / 1000
             elif abs(number) >= 100000:
                 number = number / 1000
@@ -208,271 +328,258 @@ def normalize_excel_value(value, mapping_item, source_path=None, category=None):
     return value
 
 
-def normalize_list_value(value, allowed_values):
-    if is_empty(value):
-        return None
-
-    raw = str(value).strip()
-    raw_low = raw.lower()
-
-    for allowed in allowed_values:
-        if raw == allowed:
-            return allowed
-
-    for allowed in allowed_values:
-        if raw_low == allowed.lower():
-            return allowed
-
-    if "animation" in raw_low:
-        for allowed in allowed_values:
-            if "animation" in allowed.lower():
-                return allowed
-
-    if "restaurant" in raw_low or "restauration" in raw_low:
-        for allowed in allowed_values:
-            if "restaurant" in allowed.lower():
-                return allowed
-
-    if "hébergement" in raw_low or "hebergement" in raw_low or "hotel" in raw_low:
-        for allowed in allowed_values:
-            if "hébergement" in allowed.lower() or "hebergement" in allowed.lower():
-                return allowed
-
-    if "création" in raw_low or "creation" in raw_low:
-        for allowed in allowed_values:
-            if "création" in allowed.lower() or "creation" in allowed.lower():
-                return allowed
-
-    if "extension" in raw_low:
-        for allowed in allowed_values:
-            if "extension" in allowed.lower():
-                return allowed
-
-    return raw
-
-
 # =========================================================
-# CONTEXTE PAR DÉFAUT
+# CONTEXTE PAR DÉFAUT ET ALIASES
 # =========================================================
 
 def add_context_defaults(context):
-    context.setdefault("dossier", {})
-    context.setdefault("entreprise", {})
-    context.setdefault("dirigeant", {})
-    context.setdefault("projet", {})
-    context.setdefault("banque", {})
-    context.setdefault("emplois", {})
-    context.setdefault("investissements", {})
-    context.setdefault("financement_pi", {})
-    context.setdefault("financement_expert", {})
-    context.setdefault("financement_checkbox", {})
-    context.setdefault("hypotheses_financieres", {})
-    context.setdefault("dap", {})
+    context = context if isinstance(context, dict) else {}
 
-    for key in [
+    sections = [
         "dossier",
         "entreprise",
         "dirigeant",
         "projet",
         "banque",
         "emplois",
+        "investissements",
         "financement_pi",
         "financement_expert",
         "financement_checkbox",
         "hypotheses_financieres",
         "dap",
-    ]:
-        context[key] = as_dict(context.get(key))
+        "cpc_historique",
+        "cpc_previsionnel",
+        "bilan_historique",
+        "bilan_previsionnel",
+        "impacts_historique",
+        "impacts_previsionnels",
+    ]
 
-    common_defaults = {
-        "identifiant": "",
-        "date_dossier": "",
-        "lieu_signature": "",
-        "date_signature": "",
-        "programme": "GO SIYAHA",
+    for section in sections:
+        if section == "investissements":
+            context.setdefault(section, {})
+        else:
+            context[section] = as_dict(context.get(section))
 
-        "raison_sociale": "",
-        "denomination": "",
-        "forme_juridique": "",
-        "date_creation": "",
-        "rc": "",
-        "numero_rc": "",
-        "ice": "",
-        "cnss": "",
-        "identifiant_fiscal": "",
-        "patente": "",
-        "adresse_siege": "",
-        "adresse": "",
-        "telephone": "",
-        "tel": "",
-        "email": "",
-        "site_web": "",
-        "capital_social": "",
-        "capital_social_mad": 0,
-        "actionnaires": "",
-        "activite": "",
-        "activite_selection": "",
-        "activite_autre": "",
-        "activite_detaillee": "",
-        "objet_social": "",
-        "attestation_classement": "",
-        "classement": "",
-        "categorie_classement": "",
-        "type_categorie": "",
-        "type_activite": "",
-        "categorie": "",
-        "secteur": "",
-        "secteur_activite": "",
-
-        "nom": "",
-        "prenom": "",
-        "cin": "",
-        "qualite": "",
-        "fonction": "",
-        "mobile": "",
-        "gsm": "",
-        "fixe": "",
-        "telephone_fixe": "",
-        "profil": "",
-        "affaires_gerees": "",
-
-        "objet": "",
-        "objectif": "",
-        "description": "",
-        "ville_region": "",
-        "region": "",
-        "province": "",
-        "commune": "",
-        "adresse_installations": "",
-        "adresse_site": "",
-        "lieu_realisation": "",
-        "coordonnees_gps": "",
-        "latitude": "",
-        "longitude": "",
-        "branche_activite": "",
-        "filieres": "",
-        "ecosystemes": "",
-        "activites_envisagees": "",
-        "offre_animation": "",
-        "description_offre_animation": "",
-        "fiches_projet": "",
-        "autorisations": "",
-        "biens_services_produits": "",
-        "investissement_total": 0,
-        "investissement_total_mad": 0,
-        "mode_financement_detail": "",
-        "surface_terrain": "",
-        "nature_terrain": "",
-        "titre_foncier": "",
-        "statut_foncier": "",
-        "surface_mode_occupation": "",
-        "superficie_mode_occupation": "",
-        "planning_realisation": "",
-        "date_demarrage_prevue": "",
-        "annee_demarrage": "",
-        "responsable_projet": "",
-        "responsable_nom": "",
-        "responsable_mobile": "",
-        "secteur_activite_projet": "",
-        "role_region": "",
-        "role_balance_commerciale": "",
-        "facteurs_differenciation": "",
-        "attractivite_touristique": "",
-
-        "banque_partenaire": "",
-        "banque": "",
-        "forme_juridique_banque": "",
-        "capital": "",
-        "capital_social_banque": "",
-        "siege": "",
-        "siege_social": "",
-        "fonds_propres": 0,
-        "credit_bancaire": 0,
-        "cmt": 0,
-        "leasing": 0,
-        "credit_fournisseur": 0,
-        "prime": 0,
-        "prime_istitmar": 0,
-        "montant_prime": 0,
-        "mode_financement": "",
-
-        "emplois_directs": "",
-        "emplois_indirects": "",
-        "emplois_stables": "",
-        "effectif": "",
-        "ca_prevu_annee_1": 0,
-        "croissance_ca": 0,
+    # Copier quelques champs top-level vers les sections si l'IA les renvoie à plat.
+    top_to_section = {
+        "raison_sociale": "entreprise.raison_sociale",
+        "forme_juridique": "entreprise.forme_juridique",
+        "rc": "entreprise.rc",
+        "ice": "entreprise.ice",
+        "cnss": "entreprise.cnss",
+        "capital_social": "entreprise.capital_social",
+        "capital_social_mad": "entreprise.capital_social_mad",
+        "adresse_siege": "entreprise.adresse_siege",
+        "activite": "entreprise.activite",
+        "dirigeant": "dirigeant.nom",
+        "nom_dirigeant": "dirigeant.nom",
+        "cin": "dirigeant.cin",
+        "qualite": "dirigeant.qualite",
+        "mobile": "dirigeant.mobile",
+        "email": "dirigeant.email",
+        "objet": "projet.objet",
+        "ville_region": "projet.ville_region",
+        "investissement_total": "projet.investissement_total",
+        "investissement_total_mad": "projet.investissement_total_mad",
+        "planning_realisation": "projet.planning_realisation",
+        "date_demarrage_prevue": "projet.date_demarrage_prevue",
+        "effectif": "projet.effectif",
+        "banque_nom": "banque.nom",
+        "banque_partenaire": "banque.nom",
+        "fonds_propres": "financement_expert.fonds_propres_mad",
+        "credit_bancaire": "financement_expert.credit_bancaire_mad",
+        "cmt": "financement_expert.credit_bancaire_mad",
+        "prime": "financement_expert.prime_istitmar_mad",
     }
 
-    for key, value in common_defaults.items():
-        context.setdefault(key, value)
+    for source, target in top_to_section.items():
+        if source in context and context[source] not in [None, "", [], {}]:
+            if get_context_value(context, target, "") in ["", None, 0]:
+                deep_set(context, target, context[source])
 
-    for section in [
-        "dossier",
-        "entreprise",
-        "dirigeant",
-        "projet",
-        "banque",
-        "emplois",
-        "financement_pi",
-        "financement_expert",
-        "hypotheses_financieres",
-    ]:
-        for key, value in common_defaults.items():
-            context[section].setdefault(key, value)
+    # Identité dossier
+    today_fr = date.today().strftime("%d/%m/%Y")
 
-    context["entreprise"].setdefault("numero_rc", context["entreprise"].get("rc", ""))
-    context["entreprise"].setdefault("denomination", context["entreprise"].get("raison_sociale", ""))
-    context["entreprise"].setdefault("adresse", context["entreprise"].get("adresse_siege", ""))
-    context["entreprise"].setdefault("secteur_activite", context["entreprise"].get("activite", ""))
+    entreprise = context["entreprise"]
+    dirigeant = context["dirigeant"]
+    projet = context["projet"]
+    dossier = context["dossier"]
+    banque = context["banque"]
+    financement = context["financement_expert"]
+    emplois = context["emplois"]
 
-    context["dirigeant"].setdefault("fonction", context["dirigeant"].get("qualite", ""))
-    context["dirigeant"].setdefault("gsm", context["dirigeant"].get("mobile", ""))
-    context["dirigeant"].setdefault("fixe", context["dirigeant"].get("telephone_fixe", ""))
+    raison = entreprise.get("raison_sociale") or entreprise.get("denomination") or context.get("raison_sociale", "")
+    rc = entreprise.get("rc") or entreprise.get("numero_rc") or context.get("rc", "")
 
-    context["projet"].setdefault("objectif", context["projet"].get("objet", ""))
-    context["projet"].setdefault("description", context["projet"].get("objet", ""))
-    context["projet"].setdefault("investissement_total_mad", context["projet"].get("investissement_total", 0))
-    context["projet"].setdefault("adresse_site", context["projet"].get("adresse_installations", ""))
-    context["projet"].setdefault("secteur", context["projet"].get("branche_activite", "Animation touristique"))
-    context["projet"].setdefault("secteur_activite_projet", context["projet"].get("secteur", "Animation touristique"))
-    context["projet"].setdefault("responsable_nom", context["dirigeant"].get("nom", ""))
-    context["projet"].setdefault("responsable_mobile", context["dirigeant"].get("mobile", ""))
+    dossier.setdefault("date_dossier", today_fr)
+    dossier.setdefault("date_signature", dossier.get("date_dossier") or today_fr)
+    dossier.setdefault("lieu_signature", projet.get("ville_region", "").split(",")[0].strip() or "Agadir")
 
-    context["banque"].setdefault("banque_partenaire", context["banque"].get("nom", ""))
-    context["banque"].setdefault("forme_juridique", context["banque"].get("forme_juridique_banque", "Société Anonyme"))
-    context["banque"].setdefault(
-        "capital",
-        context["banque"].get("capital_social", context["banque"].get("capital_social_banque", ""))
-    )
-    context["banque"].setdefault("siege", context["banque"].get("siege_social", ""))
+    if not dossier.get("identifiant"):
+        if context.get("identifiant"):
+            dossier["identifiant"] = context["identifiant"]
+        elif rc:
+            dossier["identifiant"] = f"INV-{rc}"
+        elif raison:
+            dossier["identifiant"] = f"INV-{safe_name(raison)}"
+        else:
+            dossier["identifiant"] = "INV-DOSSIER"
 
-    mode = context["projet"].get("mode_financement", {})
+    # Entreprise
+    entreprise.setdefault("raison_sociale", raison)
+    entreprise.setdefault("denomination", entreprise.get("raison_sociale", ""))
+    entreprise.setdefault("numero_rc", entreprise.get("rc", ""))
+    entreprise.setdefault("adresse", entreprise.get("adresse_siege", ""))
+    entreprise.setdefault("secteur_activite", entreprise.get("activite", ""))
+    entreprise.setdefault("activite_selection", entreprise.get("activite", "Animation touristique"))
+    entreprise.setdefault("activite", entreprise.get("activite_selection", "Animation touristique"))
+    entreprise.setdefault("capital_social_mad", to_number(entreprise.get("capital_social_mad") or entreprise.get("capital_social")))
 
-    if isinstance(mode, dict):
-        fonds = to_number(mode.get("fonds_propres", mode.get("autofinancement", 0)))
-        cmt = to_number(mode.get("credit_bancaire", mode.get("cmt", 0)))
-        fp = to_number(mode.get("financement_participatif", 0))
-        cf = to_number(mode.get("credit_fournisseur", 0))
-        leasing = to_number(mode.get("leasing", 0))
-    else:
-        fonds = to_number(context["financement_expert"].get("fonds_propres_mad", 0))
-        cmt = to_number(context["financement_expert"].get("credit_bancaire_mad", 0))
-        fp = to_number(context["financement_expert"].get("financement_participatif_mad", 0))
-        cf = to_number(context["financement_expert"].get("credit_fournisseur_mad", 0))
-        leasing = to_number(context["financement_expert"].get("leasing_mad", 0))
+    # Dirigeant
+    dirigeant.setdefault("nom", context.get("nom", ""))
+    dirigeant.setdefault("qualite", dirigeant.get("fonction") or "Gérant")
+    dirigeant.setdefault("fonction", dirigeant.get("qualite", "Gérant"))
+    dirigeant.setdefault("gsm", dirigeant.get("mobile", ""))
+    dirigeant.setdefault("fixe", dirigeant.get("telephone_fixe", ""))
 
-    context["financement_checkbox"].setdefault("autofinancement", "☑" if fonds > 0 else "☐")
-    context["financement_checkbox"].setdefault("cmt", "☑" if cmt > 0 else "☐")
-    context["financement_checkbox"].setdefault("financement_participatif", "☑" if fp > 0 else "☐")
-    context["financement_checkbox"].setdefault("credit_fournisseur", "☑" if cf > 0 else "☐")
-    context["financement_checkbox"].setdefault("leasing", "☑" if leasing > 0 else "☐")
+    # Projet
+    projet.setdefault("objectif", projet.get("objet", "Création"))
+    projet.setdefault("objet", projet.get("description", ""))
+    projet.setdefault("description", projet.get("objet", ""))
+    projet.setdefault("investissement_total_mad", projet.get("investissement_total", 0))
+    projet.setdefault("adresse_site", projet.get("adresse_installations", ""))
+    projet.setdefault("adresse_installations", projet.get("adresse_site", ""))
+    projet.setdefault("secteur", projet.get("branche_activite", "Animation touristique"))
+    projet.setdefault("branche_activite", projet.get("secteur", "Animation touristique"))
+    projet.setdefault("secteur_activite_projet", projet.get("secteur", "Animation touristique"))
+    projet.setdefault("filieres", "Animation touristique")
+    projet.setdefault("ecosystemes", "Animation touristique et loisirs")
+    projet.setdefault("activites_envisagees", projet.get("objet", "Activités d’animation touristique et de loisirs"))
+    projet.setdefault("responsable_nom", dirigeant.get("nom", ""))
+    projet.setdefault("responsable_projet", projet.get("responsable_nom", ""))
+    projet.setdefault("responsable_mobile", dirigeant.get("mobile", ""))
+    projet.setdefault("effectif", emplois.get("emplois_directs", emplois.get("directs", projet.get("effectif", ""))))
+    projet.setdefault("emplois_indirects", emplois.get("emplois_indirects", ""))
+    projet.setdefault("ca_prevu_annee_1", context.get("ca_prevu_2026", projet.get("ca_prevu_annee_1", 0)))
+    projet.setdefault("croissance_ca", projet.get("croissance_ca", 0.15))
+    projet.setdefault("facteurs_differenciation", context.get("facteurs_differenciation", "Le projet se distingue par une offre d’animation touristique structurée, une expérience client de qualité, une implantation régionale attractive et une organisation opérationnelle adaptée aux standards du secteur."))
+    projet.setdefault("attractivite_touristique", context.get("attractivite_touristique", "Le projet contribue au renforcement de l’attractivité touristique de la destination en diversifiant l’offre de loisirs, en améliorant l’expérience des visiteurs et en favorisant la création d’emplois locaux."))
+
+    # Banque
+    banque_nom = banque.get("nom") or banque.get("banque_partenaire") or context.get("banque", "")
+    banque.setdefault("nom", banque_nom)
+    banque.setdefault("banque_partenaire", banque.get("nom", ""))
+    banque.setdefault("forme_juridique", banque.get("forme_juridique_banque") or "Société Anonyme")
+    banque.setdefault("capital", banque.get("capital_social") or banque.get("capital_social_banque") or ("2 054 500 000" if "populaire" in banque.get("nom", "").lower() else ""))
+    banque.setdefault("siege", banque.get("siege_social") or ("101, Boulevard Zerktouni, Casablanca" if "populaire" in banque.get("nom", "").lower() else ""))
+
+    # Financement : harmonisation MAD/KMAD
+    fonds_kmad = first_non_empty(context, [
+        "financement_expert.fonds_propres_kmad",
+        "financement.fonds_propres_kmad",
+        "projet.mode_financement.fonds_propres_kmad",
+    ], None)
+    fonds_mad = first_non_empty(context, [
+        "financement_expert.fonds_propres_mad",
+        "financement_expert.fonds_propres",
+        "financement.fonds_propres_mad",
+        "projet.mode_financement.fonds_propres",
+        "projet.mode_financement.autofinancement",
+        "fonds_propres",
+    ], None)
+
+    credit_kmad = first_non_empty(context, [
+        "financement_expert.credit_bancaire_kmad",
+        "financement_expert.cmt_kmad",
+        "financement.cmt_kmad",
+        "financement.credit_bancaire_kmad",
+        "projet.mode_financement.credit_bancaire_kmad",
+    ], None)
+    credit_mad = first_non_empty(context, [
+        "financement_expert.credit_bancaire_mad",
+        "financement_expert.credit_bancaire",
+        "financement_expert.cmt",
+        "financement.cmt_mad",
+        "financement.credit_bancaire_mad",
+        "projet.mode_financement.credit_bancaire",
+        "projet.mode_financement.cmt",
+        "credit_bancaire",
+        "cmt",
+    ], None)
+
+    prime_kmad = first_non_empty(context, [
+        "financement_expert.prime_istitmar_kmad",
+        "financement_expert.prime_kmad",
+        "prime_deblocage.total_kmad",
+    ], None)
+    prime_mad = first_non_empty(context, [
+        "financement_expert.prime_istitmar_mad",
+        "financement_expert.prime_istitmar",
+        "financement_expert.prime",
+        "financement.prime_mad",
+        "projet.mode_financement.prime",
+        "prime",
+        "montant_prime",
+    ], None)
+
+    if fonds_kmad not in [None, ""]:
+        financement["fonds_propres_kmad"] = to_number(fonds_kmad)
+        financement["fonds_propres_mad"] = to_number(fonds_kmad) * 1000
+    elif fonds_mad not in [None, ""]:
+        financement["fonds_propres_mad"] = number_as_mad(fonds_mad)
+        financement["fonds_propres_kmad"] = number_as_kmad(fonds_mad)
+
+    if credit_kmad not in [None, ""]:
+        financement["credit_bancaire_kmad"] = to_number(credit_kmad)
+        financement["credit_bancaire_mad"] = to_number(credit_kmad) * 1000
+    elif credit_mad not in [None, ""]:
+        financement["credit_bancaire_mad"] = number_as_mad(credit_mad)
+        financement["credit_bancaire_kmad"] = number_as_kmad(credit_mad)
+
+    if prime_kmad not in [None, ""]:
+        financement["prime_istitmar_kmad"] = to_number(prime_kmad)
+        financement["prime_istitmar_mad"] = to_number(prime_kmad) * 1000
+    elif prime_mad not in [None, ""]:
+        financement["prime_istitmar_mad"] = number_as_mad(prime_mad)
+        financement["prime_istitmar_kmad"] = number_as_kmad(prime_mad)
+
+    for key in ["financement_participatif", "credit_fournisseur", "leasing"]:
+        v_kmad = first_non_empty(context, [f"financement_expert.{key}_kmad", f"financement.{key}_kmad"], None)
+        v_mad = first_non_empty(context, [f"financement_expert.{key}_mad", f"financement_expert.{key}", f"financement.{key}_mad"], None)
+        if v_kmad not in [None, ""]:
+            financement[f"{key}_kmad"] = to_number(v_kmad)
+            financement[f"{key}_mad"] = to_number(v_kmad) * 1000
+        elif v_mad not in [None, ""]:
+            financement[f"{key}_mad"] = number_as_mad(v_mad)
+            financement[f"{key}_kmad"] = number_as_kmad(v_mad)
+        else:
+            financement.setdefault(f"{key}_kmad", 0)
+            financement.setdefault(f"{key}_mad", 0)
+
+    # Checkboxes DAP
+    context["financement_checkbox"]["autofinancement"] = "☑" if to_number(financement.get("fonds_propres_kmad", 0)) > 0 else "☐"
+    context["financement_checkbox"]["cmt"] = "☑" if to_number(financement.get("credit_bancaire_kmad", 0)) > 0 else "☐"
+    context["financement_checkbox"]["financement_participatif"] = "☑" if to_number(financement.get("financement_participatif_kmad", 0)) > 0 else "☐"
+    context["financement_checkbox"]["credit_fournisseur"] = "☑" if to_number(financement.get("credit_fournisseur_kmad", 0)) > 0 else "☐"
+    context["financement_checkbox"]["leasing"] = "☑" if to_number(financement.get("leasing_kmad", 0)) > 0 else "☐"
+
+    # Valeurs narratives DAP
+    context.setdefault("synthese_etude_marche", "Le marché ciblé présente un potentiel favorable grâce à la dynamique touristique régionale, à la demande croissante pour des expériences de loisirs structurées et à la complémentarité du projet avec l’offre touristique existante.")
+    context.setdefault("facteurs_differenciation", projet.get("facteurs_differenciation", ""))
+    context.setdefault("attractivite_touristique", projet.get("attractivite_touristique", ""))
 
     return context
 
 
+# Compatibilité avec les anciens appels du fichier.
+def add_docx_defaults(context):
+    return add_context_defaults(context)
+
+
 # =========================================================
-# BP EXCEL
+# BP EXCEL AVANCÉ
 # =========================================================
 
 def build_candidate_paths(mapping_item):
@@ -491,10 +598,18 @@ def build_candidate_paths(mapping_item):
     for path in paths:
         if path.endswith("_kmad"):
             extra.append(path[:-5] + "_mad")
+        if path.endswith("_mad"):
+            extra.append(path[:-4] + "_kmad")
         if ".financement_expert." in path:
             extra.append(path.replace(".financement_expert.", ".financement."))
         if path.startswith("financement_expert."):
             extra.append(path.replace("financement_expert.", "financement."))
+        if path.startswith("banque."):
+            extra.append(path.replace("banque.", "projet.banque."))
+        if path.startswith("entreprise."):
+            extra.append(path.split(".", 1)[1])
+        if path.startswith("projet."):
+            extra.append(path.split(".", 1)[1])
 
     for path in extra:
         if path not in paths:
@@ -507,7 +622,7 @@ def get_value_from_mapping(data, mapping_item):
     for path in build_candidate_paths(mapping_item):
         value = get_context_value(data, path, None)
 
-        if not is_empty(value):
+        if value not in [None, "", [], {}]:
             return value, path
 
     if "default" in mapping_item:
@@ -562,21 +677,29 @@ def is_blocked_cell(sheet_name, cell_ref, blocked_ranges):
     return False
 
 
-def write_excel_cell(ws, cell_ref, value, blocked_ranges):
+def write_excel_cell(ws, cell_ref, value, blocked_ranges=None, overwrite_formula=False):
+    blocked_ranges = blocked_ranges or {}
+
     if is_blocked_cell(ws.title, cell_ref, blocked_ranges):
         return False
 
-    cell = ws[cell_ref]
-
-    if cell.data_type == "f" or (isinstance(cell.value, str) and cell.value.startswith("=")):
+    try:
+        cell = ws[cell_ref]
+    except Exception:
         return False
+
+    if not overwrite_formula:
+        if getattr(cell, "data_type", None) == "f" or (isinstance(cell.value, str) and cell.value.startswith("=")):
+            return False
 
     if value is None:
         return False
 
-    cell.value = value
-
-    return True
+    try:
+        cell.value = value
+        return True
+    except Exception:
+        return False
 
 
 def write_mapping_section(wb, data, mapping, section_name, blocked_ranges):
@@ -605,14 +728,7 @@ def write_mapping_section(wb, data, mapping, section_name, blocked_ranges):
 
 
 def normalize_category_name(value):
-    if not value:
-        return ""
-
-    text = str(value).lower()
-    text = text.replace("é", "e").replace("è", "e").replace("ê", "e")
-    text = text.replace("à", "a").replace("â", "a")
-    text = text.replace("ç", "c")
-    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    text = normalize_key_text(value)
 
     if "terrain" in text:
         return "terrain"
@@ -622,12 +738,59 @@ def normalize_category_name(value):
         return "amenagement_agencement"
     if "materiel" in text or "equipement" in text:
         return "materiel_equipement"
-    if "frais" in text and "prelim" in text:
+    if "frais" in text and ("prelim" in text or "prealable" in text):
         return "frais_preliminaires"
     if "divers" in text or "imprevu" in text:
         return "divers_imprevus"
 
     return text
+
+
+def normalize_investissements(data):
+    investissements = data.get("investissements", {})
+
+    result = {
+        "terrain": [],
+        "constructions": [],
+        "amenagement_agencement": [],
+        "materiel_equipement": [],
+        "frais_preliminaires": [],
+        "divers_imprevus": [],
+        "frais_approche": [],
+    }
+
+    if isinstance(investissements, dict):
+        for key, value in investissements.items():
+            norm = normalize_category_name(key)
+            if norm in result:
+                if isinstance(value, list):
+                    result[norm] = value
+                elif isinstance(value, dict):
+                    result[norm] = [value]
+            elif isinstance(value, list):
+                result.setdefault(norm, value)
+        return result
+
+    if isinstance(investissements, list):
+        for item in investissements:
+            if not isinstance(item, dict):
+                continue
+
+            cat = normalize_category_name(
+                item.get("categorie")
+                or item.get("category")
+                or item.get("type")
+                or item.get("rubrique")
+                or item.get("nature")
+                or ""
+            )
+
+            if cat not in result:
+                cat = "materiel_equipement"
+
+            result[cat].append(item)
+
+    return result
 
 
 def get_bp_source_array(data, source_array, category):
@@ -639,34 +802,70 @@ def get_bp_source_array(data, source_array, category):
     if isinstance(arr, dict):
         return list(arr.values())
 
-    investissements = data.get("investissements")
+    investissements = normalize_investissements(data)
+    return investissements.get(category, [])
 
-    if isinstance(investissements, dict):
-        possible = investissements.get(category)
 
-        if isinstance(possible, list):
-            return possible
+def get_default_tva(col_map, category):
+    if "default_by_category" in col_map:
+        defaults = col_map["default_by_category"]
+        value = defaults.get(category, defaults.get("default"))
+        if value is not None:
+            return to_number(value)
 
-    if isinstance(investissements, list):
-        filtered = []
+    if "default" in col_map:
+        return to_number(col_map.get("default"))
 
-        for item in investissements:
-            if not isinstance(item, dict):
-                continue
+    return 0.2 if category != "terrain" else 0
 
-            item_category = normalize_category_name(
-                item.get("categorie")
-                or item.get("category")
-                or item.get("type")
-                or item.get("rubrique")
-            )
 
-            if item_category == category:
-                filtered.append(item)
+def get_investment_cell_value(row_data, col_map, category):
+    field = col_map.get("field")
+    value = deep_get(row_data, field, None) if field else None
 
-        return filtered
+    # Le BP attend le montant HT dans la colonne K.
+    # Si l'IA donne seulement un montant global/TTC, on convertit en HT afin que le total TTC reste cohérent.
+    if field == "montant_ht_devise" and value in [None, "", [], {}]:
+        candidate_fields = [
+            "montant_ht_devise",
+            "montant_ht",
+            "montant_ht_mad",
+            "montant_ttc",
+            "montant_ttc_mad",
+            "montant",
+            "montant_mad",
+            "cout_mad",
+            "total_mad",
+            "valeur",
+            "prix",
+        ]
 
-    return []
+        source_field = None
+        for cand in candidate_fields:
+            v = deep_get(row_data, cand, None)
+            if v not in [None, "", [], {}]:
+                value = v
+                source_field = cand
+                break
+
+        if source_field and "ht" not in source_field:
+            taux = deep_get(row_data, "taux_tva", None)
+            if taux in [None, ""]:
+                taux = get_default_tva(col_map, category)
+            taux = to_number(taux)
+            if taux > 1:
+                taux = taux / 100
+            if taux > 0:
+                value = to_number(value) / (1 + taux)
+
+    if value in [None, "", [], {}]:
+        if "default_by_category" in col_map:
+            defaults = col_map["default_by_category"]
+            value = defaults.get(category, defaults.get("default"))
+        elif "default" in col_map:
+            value = col_map["default"]
+
+    return value
 
 
 def write_bp_table_mappings(wb, data, mapping, blocked_ranges):
@@ -702,16 +901,10 @@ def write_bp_table_mappings(wb, data, mapping, blocked_ranges):
                 if not col_letter or not field:
                     continue
 
-                value = deep_get(row_data, field, None)
+                value = get_investment_cell_value(row_data, col_map, category)
 
-                if is_empty(value):
-                    if "default_by_category" in col_map:
-                        defaults = col_map["default_by_category"]
-                        value = defaults.get(category, defaults.get("default"))
-                    elif "default" in col_map:
-                        value = col_map["default"]
-                    else:
-                        continue
+                if value in [None, "", [], {}]:
+                    continue
 
                 value = normalize_excel_value(value, col_map, source_path=field, category=category)
                 cell_ref = f"{col_letter}{excel_row}"
@@ -729,6 +922,66 @@ def force_excel_recalculation(wb):
         wb.calculation.calcMode = "auto"
     except Exception:
         pass
+
+
+def apply_bp_post_corrections(wb, context):
+    """
+    Corrections BP après mapping :
+    - Prime ISTITMAR sans #NAME?
+    - Financement en KMAD cohérent
+    - Report à nouveau chaîné
+    - Trésorerie actif/passif comme variable d'équilibrage du Bilan
+    """
+    if "Mode de financement" in wb.sheetnames:
+        ws = wb["Mode de financement"]
+
+        fonds_kmad = to_number(get_context_value(context, "financement_expert.fonds_propres_kmad", 0))
+        credit_kmad = to_number(get_context_value(context, "financement_expert.credit_bancaire_kmad", 0))
+        fp_kmad = to_number(get_context_value(context, "financement_expert.financement_participatif_kmad", 0))
+        cf_kmad = to_number(get_context_value(context, "financement_expert.credit_fournisseur_kmad", 0))
+        leasing_kmad = to_number(get_context_value(context, "financement_expert.leasing_kmad", 0))
+        prime_kmad = to_number(get_context_value(context, "financement_expert.prime_istitmar_kmad", 0))
+
+        if not prime_kmad:
+            prime_mad = to_number(get_context_value(context, "financement_expert.prime_istitmar_mad", 0))
+            prime_kmad = prime_mad / 1000 if prime_mad else 0
+
+        # Cellules principales du mode de financement
+        if fonds_kmad:
+            write_excel_cell(ws, "G16", fonds_kmad, overwrite_formula=True)
+        if credit_kmad:
+            write_excel_cell(ws, "H16", credit_kmad, overwrite_formula=True)
+        if fp_kmad:
+            write_excel_cell(ws, "I16", fp_kmad, overwrite_formula=True)
+        if cf_kmad:
+            write_excel_cell(ws, "J16", cf_kmad, overwrite_formula=True)
+        if leasing_kmad:
+            write_excel_cell(ws, "K16", leasing_kmad, overwrite_formula=True)
+        if prime_kmad:
+            # L16 est souvent la prime ; l'écriture supprime le #NAME?.
+            write_excel_cell(ws, "L16", prime_kmad, overwrite_formula=True)
+
+        for target_col, source_col in zip(["N", "O", "P", "Q", "R", "S"], ["G", "H", "I", "J", "K", "L"]):
+            write_excel_cell(ws, f"{target_col}16", f"=IFERROR({source_col}16/SUM($G$16:$L$16),0)", overwrite_formula=True)
+
+    if "Bilan" in wb.sheetnames:
+        ws = wb["Bilan"]
+
+        # Chaînage du report à nouveau / résultats non affectés
+        write_excel_cell(ws, "H56", 0, overwrite_formula=True)
+        write_excel_cell(ws, "I56", "=H56+H57", overwrite_formula=True)
+        write_excel_cell(ws, "J56", "=I56+I57", overwrite_formula=True)
+        write_excel_cell(ws, "K56", "=J56+J57", overwrite_formula=True)
+        write_excel_cell(ws, "L56", "=K56+K57", overwrite_formula=True)
+        write_excel_cell(ws, "M56", "=L56+L57", overwrite_formula=True)
+
+        # Variable de bouclage : trésorerie actif/passif
+        for col in ["H", "I", "J", "K", "L", "M"]:
+            write_excel_cell(ws, f"{col}45", f"=MAX(0,({col}68+{col}78)-({col}27+{col}43))", overwrite_formula=True)
+            write_excel_cell(ws, f"{col}80", f"=MAX(0,({col}27+{col}43)-({col}68+{col}78))", overwrite_formula=True)
+            write_excel_cell(ws, f"{col}85", f"={col}47-{col}82", overwrite_formula=True)
+
+        write_excel_cell(ws, "A3", '=IF(AND(ABS(H85)<50,ABS(I85)<50,ABS(J85)<50,ABS(K85)<50,ABS(L85)<50,ABS(M85)<50),"Equilibré","Déséquilibré")', overwrite_formula=True)
 
 
 def render_bp_excel(output_path, context):
@@ -756,6 +1009,7 @@ def render_bp_excel(output_path, context):
         "impacts_mappings": write_mapping_section(wb, context, mapping, "impacts_mappings", blocked_ranges),
     }
 
+    apply_bp_post_corrections(wb, context)
     force_excel_recalculation(wb)
     wb.save(output_path)
 
@@ -800,7 +1054,10 @@ def safe_row_cells(row, table):
     try:
         return list(row.cells)
     except Exception:
-        return []
+        try:
+            return [_Cell(tc, row) for tc in row._tr.tc_lst]
+        except Exception:
+            return []
 
 
 def get_table_by_index(doc, index):
@@ -810,22 +1067,37 @@ def get_table_by_index(doc, index):
         return None
 
 
+def iter_container_paragraphs(container):
+    try:
+        for paragraph in container.paragraphs:
+            yield paragraph
+    except Exception:
+        pass
+
+    try:
+        for table in container.tables:
+            rows = safe_table_rows(table)
+            for row in rows:
+                cells = safe_row_cells(row, table)
+                for cell in cells:
+                    try:
+                        for paragraph in cell.paragraphs:
+                            yield paragraph
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+
+
 def iter_all_paragraphs(doc):
-    for paragraph in doc.paragraphs:
-        yield paragraph
+    yield from iter_container_paragraphs(doc)
 
-    for table in doc.tables:
-        rows = safe_table_rows(table)
-
-        for row in rows:
-            cells = safe_row_cells(row, table)
-
-            for cell in cells:
-                try:
-                    for paragraph in cell.paragraphs:
-                        yield paragraph
-                except Exception:
-                    continue
+    try:
+        for section in doc.sections:
+            yield from iter_container_paragraphs(section.header)
+            yield from iter_container_paragraphs(section.footer)
+    except Exception:
+        pass
 
 
 def set_cell_value(cell, value):
@@ -842,6 +1114,28 @@ def set_paragraph_text(paragraph, value):
         pass
 
 
+def replace_text_in_xml_container(container, search, replace):
+    if not search:
+        return
+
+    replace = "" if replace is None else str(replace)
+
+    try:
+        root = container.element
+    except Exception:
+        try:
+            root = container._element
+        except Exception:
+            return
+
+    try:
+        for node in root.iter(qn("w:t")):
+            if node.text and search in node.text:
+                node.text = node.text.replace(search, replace)
+    except Exception:
+        pass
+
+
 def replace_text_everywhere(doc, search, replace):
     if not search:
         return
@@ -854,6 +1148,15 @@ def replace_text_everywhere(doc, search, replace):
                 paragraph.text = paragraph.text.replace(search, replace)
         except Exception:
             continue
+
+    replace_text_in_xml_container(doc, search, replace)
+
+    try:
+        for section in doc.sections:
+            replace_text_in_xml_container(section.header, search, replace)
+            replace_text_in_xml_container(section.footer, search, replace)
+    except Exception:
+        pass
 
 
 def fill_cell_next_to_label(doc, label, value, position="right", occurrence=1):
@@ -902,30 +1205,6 @@ def fill_cell_next_to_label(doc, label, value, position="right", occurrence=1):
     return False
 
 
-def find_docx_table(doc, anchor_label):
-    anchor = normalize_label(anchor_label)
-
-    for table in doc.tables:
-        texts = []
-        rows = safe_table_rows(table)
-
-        for row in rows:
-            cells = safe_row_cells(row, table)
-
-            for cell in cells:
-                try:
-                    texts.append(cell.text)
-                except Exception:
-                    continue
-
-        table_text = normalize_label(" ".join(texts))
-
-        if anchor in table_text:
-            return table
-
-    return None
-
-
 # =========================================================
 # DAP WORD AVANCÉ
 # =========================================================
@@ -936,19 +1215,25 @@ def get_expert_default(mapping, field):
     if field in defaults:
         return defaults[field]
 
-    return ""
+    default_texts = {
+        "synthese_etude_marche": "Le projet répond à une demande croissante pour des expériences touristiques différenciées et structurées. Il s’inscrit dans une dynamique régionale favorable portée par la reprise du tourisme, la diversification de l’offre de loisirs et l’intérêt des visiteurs pour des activités expérientielles.",
+        "facteurs_differenciation": "Le projet se différencie par la qualité de l’expérience proposée, la structuration de l’offre, la sécurité des prestations, l’ancrage régional et la capacité à créer des partenariats avec les acteurs touristiques locaux.",
+        "attractivite_touristique": "Le projet contribue à l’attractivité de la destination Maroc en diversifiant les activités de loisirs, en améliorant l’expérience client et en renforçant l’offre d’animation touristique disponible au niveau régional.",
+    }
+
+    return default_texts.get(field, "")
 
 
 def generate_default_rows(source_array, context):
     key = str(source_array).split(".")[-1]
 
     projet = context.get("projet", {})
-    entreprise = context.get("entreprise", {})
     emplois = context.get("emplois", {})
 
     objet = projet.get("objet") or projet.get("description") or "activité d’animation touristique"
     ville = projet.get("ville_region") or projet.get("region") or "la zone d’implantation"
     ca = to_number(projet.get("ca_prevu_annee_1", 0))
+    croissance = to_number(projet.get("croissance_ca", 0.15)) or 0.15
     effectif = int(to_number(projet.get("effectif") or emplois.get("directs") or emplois.get("emplois_directs") or 5))
 
     if key == "gamme_services":
@@ -1044,13 +1329,13 @@ def generate_default_rows(source_array, context):
         return [
             {
                 "libelle": "Animation touristique",
-                "taux_croissance": format_display_value(projet.get("croissance_ca", 0.15), "percent"),
+                "taux_croissance": format_display_value(croissance, "percent"),
                 "2026_kmad": round(ca / 1000) if ca else "",
-                "2027_kmad": round(ca * 1.15 / 1000) if ca else "",
-                "2028_kmad": round(ca * 1.15**2 / 1000) if ca else "",
-                "2029_kmad": round(ca * 1.15**3 / 1000) if ca else "",
-                "2030_kmad": round(ca * 1.15**4 / 1000) if ca else "",
-                "2031_kmad": round(ca * 1.15**5 / 1000) if ca else "",
+                "2027_kmad": round(ca * (1 + croissance) / 1000) if ca else "",
+                "2028_kmad": round(ca * (1 + croissance) ** 2 / 1000) if ca else "",
+                "2029_kmad": round(ca * (1 + croissance) ** 3 / 1000) if ca else "",
+                "2030_kmad": round(ca * (1 + croissance) ** 4 / 1000) if ca else "",
+                "2031_kmad": round(ca * (1 + croissance) ** 5 / 1000) if ca else "",
             }
         ]
 
@@ -1075,6 +1360,36 @@ def get_dap_source_array(context, source_array, mapping_item=None):
         return generated
 
     return []
+
+
+def apply_dap_cover_replacements(doc, context):
+    dossier = context.get("dossier", {})
+    entreprise = context.get("entreprise", {})
+
+    identifiant = dossier.get("identifiant", "INV-DOSSIER")
+    raison = entreprise.get("raison_sociale", "SOCIETE")
+    date_doc = dossier.get("date_dossier") or dossier.get("date_signature") or date.today().strftime("%d/%m/%Y")
+
+    replacements = {
+        "INV-XXX | MaSociété": f"{identifiant} | {raison}",
+        "INV-XXX": identifiant,
+        "MaSociété": raison,
+        "Click or tap to enter a date.": date_doc,
+        "Click or tap to enter a date": date_doc,
+    }
+
+    for old, new in replacements.items():
+        replace_text_everywhere(doc, old, new)
+
+    for paragraph in iter_all_paragraphs(doc):
+        try:
+            txt = paragraph.text
+            if "INV-" in txt and "MaSociété" in txt:
+                paragraph.text = f"{identifiant} | {raison}"
+            elif "Click or tap to enter" in txt:
+                paragraph.text = date_doc
+        except Exception:
+            continue
 
 
 def apply_scalar_text_replacements(doc, context, mapping):
@@ -1205,6 +1520,7 @@ def apply_table_cell_mappings(doc, context, mapping):
 
         value = format_display_value(value, fmt)
 
+        # Important : ne jamais écrire dans la cellule libellé si cellule de droite absente.
         if len(cells) < 2:
             continue
 
@@ -1415,6 +1731,22 @@ def apply_paragraph_mappings(doc, context, mapping):
                 continue
 
 
+def set_checkbox_label(doc, label, checked):
+    mark = "☑" if checked else "☐"
+    label_norm = normalize_label(label)
+
+    for pattern in [f"☐ {label}", f"□ {label}", f"☑ {label}", f"☐{label}", f"□{label}", f"☑{label}"]:
+        replace_text_everywhere(doc, pattern, f"{mark} {label}")
+
+    for paragraph in iter_all_paragraphs(doc):
+        try:
+            txt_norm = normalize_label(paragraph.text)
+            if label_norm in txt_norm and ("☐" in paragraph.text or "□" in paragraph.text or "☑" in paragraph.text):
+                paragraph.text = f"{mark} {label}"
+        except Exception:
+            continue
+
+
 def apply_checkbox_mappings(doc, context, mapping):
     for item in mapping.get("checkbox_mappings", []):
         label = item.get("label")
@@ -1424,22 +1756,23 @@ def apply_checkbox_mappings(doc, context, mapping):
             continue
 
         raw = get_context_value(context, field, "☐")
-        checked = raw is True or str(raw).strip() in ["☑", "true", "True", "1", "oui", "Oui"]
+        checked = raw is True or str(raw).strip() in ["☑", "true", "True", "1", "oui", "Oui", "yes", "checked"]
+        set_checkbox_label(doc, label, checked)
 
-        checked_value = item.get("checked_value", "☑")
-        unchecked_value = item.get("unchecked_value", "☐")
-        mark = checked_value if checked else unchecked_value
 
-        label_norm = normalize_label(label)
+def apply_dap_financing_checkboxes(doc, context):
+    financing_labels = [
+        ("Autofinancement", "financement_checkbox.autofinancement"),
+        ("CMT", "financement_checkbox.cmt"),
+        ("Financement participatif", "financement_checkbox.financement_participatif"),
+        ("Crédit fournisseur", "financement_checkbox.credit_fournisseur"),
+        ("Leasing", "financement_checkbox.leasing"),
+    ]
 
-        for paragraph in iter_all_paragraphs(doc):
-            try:
-                txt_norm = normalize_label(paragraph.text)
-
-                if label_norm in txt_norm and ("☐" in paragraph.text or "□" in paragraph.text or "☑" in paragraph.text):
-                    paragraph.text = f"{mark} {label}"
-            except Exception:
-                continue
+    for label, field in financing_labels:
+        raw = get_context_value(context, field, "☐")
+        checked = str(raw).strip() == "☑"
+        set_checkbox_label(doc, label, checked)
 
 
 def apply_dap_default_mappings(doc, context):
@@ -1449,19 +1782,33 @@ def apply_dap_default_mappings(doc, context):
         {"label": "Forme juridique", "field": "entreprise.forme_juridique"},
         {"label": "Date de création", "field": "entreprise.date_creation"},
         {"label": "Secteur d’activité", "field": "entreprise.activite"},
+        {"label": "Type et Catégorie", "field": "entreprise.type_categorie"},
         {"label": "Capital social (MAD)", "field": "entreprise.capital_social_mad"},
+        {"label": "Actionnaires (%)", "field": "entreprise.actionnaires"},
         {"label": "Registre de commerce", "field": "entreprise.rc"},
         {"label": "Identifiant Commun de l'Entreprise", "field": "entreprise.ice"},
         {"label": "CNSS", "field": "entreprise.cnss"},
         {"label": "Adresse du siège social", "field": "entreprise.adresse_siege"},
+        {"label": "Adresse du site d’implantation", "field": "projet.adresse_installations"},
         {"label": "Dirigeant", "field": "dirigeant.nom"},
         {"label": "Mobile (Cellulaire)", "field": "dirigeant.mobile"},
         {"label": "Courrier électronique", "field": "dirigeant.email"},
+        {"label": "Filière(s) du projet", "field": "projet.filieres"},
         {"label": "Objet du projet", "field": "projet.objet"},
+        {"label": "Adresse des installations", "field": "projet.adresse_installations"},
         {"label": "Ville/Région du Projet", "field": "projet.ville_region"},
+        {"label": "Superficie et mode d’occupation du site", "field": "projet.surface_mode_occupation"},
         {"label": "Effectif à embaucher", "field": "projet.effectif"},
+        {"label": "Planning de réalisation", "field": "projet.planning_realisation"},
+        {"label": "Date prévue de démarrage", "field": "projet.date_demarrage_prevue"},
+        {"label": "Responsable de projet", "field": "projet.responsable_projet"},
+        {"label": "Mobile (Cellulaire) du resp. de projet", "field": "projet.responsable_mobile"},
         {"label": "Partenaire financier", "field": "banque.nom"},
         {"label": "Investissement total", "field": "projet.investissement_total"},
+        {"label": "Secteur d’activité du projet", "field": "projet.secteur_activite_projet"},
+        {"label": "Ecosystème(s) du projet", "field": "projet.ecosystemes"},
+        {"label": "Activité(s) envisagée(s)", "field": "projet.activites_envisagees"},
+        {"label": "Fiche(s) de projet", "field": "projet.fiches_projet"},
     ]
 
     for item in default_mappings:
@@ -1471,16 +1818,52 @@ def apply_dap_default_mappings(doc, context):
             fill_cell_next_to_label(doc, item["label"], value)
 
 
+def apply_dap_narrative_fallbacks(doc, context):
+    narrative_rules = [
+        {
+            "search": "Synthétiser l’étude de marché réalisée",
+            "value": get_context_value(context, "synthese_etude_marche", ""),
+        },
+        {
+            "search": "Décrire brièvement les facteurs de différenciation",
+            "value": get_context_value(context, "facteurs_differenciation", ""),
+        },
+        {
+            "search": "Décrire succinctement l’attractivité touristique estimée",
+            "value": get_context_value(context, "attractivite_touristique", ""),
+        },
+    ]
+
+    for rule in narrative_rules:
+        search_norm = normalize_label(rule["search"])
+        value = rule["value"]
+
+        if not value:
+            continue
+
+        for paragraph in iter_all_paragraphs(doc):
+            try:
+                if search_norm in normalize_label(paragraph.text):
+                    paragraph.text = value
+                    break
+            except Exception:
+                continue
+
+
 def apply_dap_mapping_file(doc, context):
     mapping_path = find_file("mapping_dap_istitmar.json")
 
     if mapping_path is None:
+        apply_dap_cover_replacements(doc, context)
         apply_dap_default_mappings(doc, context)
+        apply_dap_financing_checkboxes(doc, context)
+        apply_dap_narrative_fallbacks(doc, context)
         return {"mapping_used": False, "reason": "mapping_dap_istitmar.json introuvable"}
 
     with open(mapping_path, "r", encoding="utf-8") as f:
         mapping = json.load(f)
 
+    apply_dap_cover_replacements(doc, context)
     apply_scalar_text_replacements(doc, context, mapping)
     apply_legacy_text_replacements(doc, context, mapping)
     apply_legacy_label_mappings(doc, context, mapping)
@@ -1490,7 +1873,10 @@ def apply_dap_mapping_file(doc, context):
     apply_paragraph_mappings(doc, context, mapping)
     apply_checkbox_mappings(doc, context, mapping)
     apply_dap_default_mappings(doc, context)
+    apply_dap_financing_checkboxes(doc, context)
+    apply_dap_narrative_fallbacks(doc, context)
 
+    # Ne pas nettoyer les placeholders par défaut : cela casse la structure du DAP.
     if mapping.get("cleanup_enabled") is True:
         for placeholder in mapping.get("cleanup_placeholders", []):
             replace_text_everywhere(doc, placeholder, "")
@@ -1523,24 +1909,29 @@ def render_dap_docx(output_path, context):
     return info
 
 
+# Ancien nom conservé pour compatibilité.
+def render_dap_with_mapping(output_path, context):
+    return render_dap_docx(output_path, context)
+
+
 # =========================================================
 # WORD / DOCUMENTS JURIDIQUES
 # =========================================================
 
-def apply_legal_doc_defaults(doc, context):
+def apply_legal_doc_defaults(doc, context, template_name=None):
     dossier = context.get("dossier", {})
     entreprise = context.get("entreprise", {})
     dirigeant = context.get("dirigeant", {})
     banque = context.get("banque", {})
 
     nom = dirigeant.get("nom", "")
-    qualite = dirigeant.get("qualite", dirigeant.get("fonction", ""))
+    qualite = dirigeant.get("qualite", dirigeant.get("fonction", "Gérant")) or "Gérant"
     cin = dirigeant.get("cin", "")
     raison = entreprise.get("raison_sociale", "")
     forme = entreprise.get("forme_juridique", "")
     rc = entreprise.get("rc", "")
     lieu = dossier.get("lieu_signature", "")
-    date = dossier.get("date_signature", "")
+    date_sig = dossier.get("date_signature", "")
 
     banque_nom = banque.get("nom", banque.get("banque_partenaire", ""))
     banque_forme = banque.get("forme_juridique", banque.get("forme_juridique_banque", "Société Anonyme"))
@@ -1556,9 +1947,9 @@ def apply_legal_doc_defaults(doc, context):
                 f"agissant au nom et pour le compte de {raison} {forme} :"
             )
 
-        elif "Je soussigné (prénom, nom)" in text:
+        elif "Je soussigné (prénom, nom)" in text or ("Je soussigné" in text and "signataire de la convention" in text):
             paragraph.text = (
-                f"Je soussigné {nom} en sa qualité de {qualite}, "
+                f"Je soussigné {nom}, en sa qualité de {qualite}, "
                 f"signataire de la convention d’investissement avec MAROC PME, "
                 f"titulaire de la CIN N° {cin} et agissant au nom et pour le compte "
                 f"de la société {raison} {forme}, inscrite au registre du commerce N° {rc} ;"
@@ -1580,7 +1971,7 @@ def apply_legal_doc_defaults(doc, context):
             )
 
         elif "Fait à" in text and ("Le" in text or "le" in text or "………" in text):
-            paragraph.text = f"Fait à : {lieu}    Le : {date}"
+            paragraph.text = f"Fait à : {lieu}    Le : {date_sig}"
 
 
 def render_legal_docx(template_name, output_path, context):
@@ -1597,8 +1988,15 @@ def render_legal_docx(template_name, output_path, context):
     doc_tpl.save(str(tmp_docx))
 
     doc = Document(str(tmp_docx))
-    apply_legal_doc_defaults(doc, safe_context)
+    apply_legal_doc_defaults(doc, safe_context, template_name)
     doc.save(str(output_path))
+
+
+def render_docx(template_name, output_path, context):
+    if template_name == "DAP_template.docx":
+        render_dap_docx(output_path, context)
+    else:
+        render_legal_docx(template_name, output_path, context)
 
 
 # =========================================================
@@ -1609,8 +2007,10 @@ def render_legal_docx(template_name, output_path, context):
 def root():
     return {
         "status": "ok",
-        "service": "GO SIYAHA filler API",
+        "message": "GO SIYAHA filler API",
         "base_dir": str(BASE_DIR),
+        "templates_dir": str(TEMPLATE_DIR),
+        "mappings_dir": str(MAPPING_DIR),
     }
 
 
@@ -1620,8 +2020,8 @@ def health():
         "status": "ok",
         "base_dir": str(BASE_DIR),
         "templates": {
-            "BP_template.xlsx": find_file("BP_template.xlsx") is not None,
             "DAP_template.docx": find_file("DAP_template.docx") is not None,
+            "BP_template.xlsx": find_file("BP_template.xlsx") is not None,
             "demande_participation.docx": find_file("demande_participation.docx") is not None,
             "engagement_capacite_financiere.docx": find_file("engagement_capacite_financiere.docx") is not None,
             "engagement_autorisations.docx": find_file("engagement_autorisations.docx") is not None,
@@ -1670,10 +2070,7 @@ def debug_bp():
         }
 
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "error": str(e)}
-        )
+        return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
 
 
 @app.get("/debug-mapping")
@@ -1738,8 +2135,46 @@ async def fill(request: Request):
 
         selected_template = aliases.get(selected_template, selected_template)
 
-        context = add_context_defaults(copy.deepcopy(data))
-        context["selected_template"] = selected_template
+        context = {
+            **data,
+            "selected_template": selected_template,
+            "dossier": data.get("dossier", {}),
+            "entreprise": data.get("entreprise", {}),
+            "dirigeant": data.get("dirigeant", {}),
+            "projet": data.get("projet", {}),
+            "investissements": data.get("investissements", {}),
+            "emplois": data.get("emplois", {}),
+            "banque": data.get("banque", {}),
+            "financement_pi": data.get("financement_pi", {}),
+            "cpc_historique": data.get("cpc_historique", {}),
+            "cpc_previsionnel": data.get("cpc_previsionnel", {}),
+            "bilan_historique": data.get("bilan_historique", {}),
+            "bilan_previsionnel": data.get("bilan_previsionnel", {}),
+            "impacts_historique": data.get("impacts_historique", {}),
+            "impacts_previsionnels": data.get("impacts_previsionnels", {}),
+            "hypotheses_financieres": data.get("hypotheses_financieres", {}),
+            "financement_expert": data.get("financement_expert", {}),
+            "financement_checkbox": data.get("financement_checkbox", {}),
+            "dap": data.get("dap", {}),
+            "gamme_services": data.get("gamme_services", []),
+            "marche_cibles": data.get("marche_cibles", []),
+            "concurrents": data.get("concurrents", []),
+            "fournisseurs": data.get("fournisseurs", []),
+            "clients_creneaux": data.get("clients_creneaux", []),
+            "politique_prix": data.get("politique_prix", []),
+            "capacites_animation": data.get("capacites_animation", []),
+            "emplois_directs_profils": data.get("emplois_directs_profils", []),
+            "recettes_devises": data.get("recettes_devises", []),
+            "achats_devises": data.get("achats_devises", {}),
+            "ca_previsionnel_dap": data.get("ca_previsionnel_dap", {}),
+            "synthese_etude_marche": data.get("synthese_etude_marche", ""),
+            "strategie_approvisionnement": data.get("strategie_approvisionnement", {}),
+            "strategie_commerciale": data.get("strategie_commerciale", {}),
+            "facteurs_differenciation": data.get("facteurs_differenciation", ""),
+            "attractivite_touristique": data.get("attractivite_touristique", ""),
+        }
+
+        context = add_context_defaults(context)
 
         dossier = context["dossier"]
         entreprise = context["entreprise"]
@@ -1854,10 +2289,7 @@ async def fill(request: Request):
         generated_files.append(debug_path)
 
         if not generated_files:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Aucun fichier généré."},
-            )
+            return JSONResponse(status_code=400, content={"error": "Aucun fichier généré."})
 
         with zipfile.ZipFile(output_zip, "w", zipfile.ZIP_DEFLATED) as zipf:
             for file_path in generated_files:
@@ -1869,8 +2301,8 @@ async def fill(request: Request):
             filename=output_zip.name,
         )
 
+    except FileNotFoundError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e)},
-        )
+        return JSONResponse(status_code=500, content={"error": str(e)})
