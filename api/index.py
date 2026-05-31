@@ -1367,7 +1367,34 @@ def health():
         },
     }
 
+@app.get("/debug-mapping")
+def debug_mapping():
+    mapping_path = MAPPING_DIR / "mapping_dap_istitmar.json"
 
+    try:
+        text = mapping_path.read_text(encoding="utf-8")
+        data = json.loads(text)
+
+        return {
+            "status": "ok",
+            "mapping_path": str(mapping_path),
+            "version": data.get("version"),
+            "mapping_name": data.get("mapping_name"),
+            "sections": list(data.keys())
+        }
+
+    except Exception as e:
+        lines = text.splitlines() if "text" in locals() else []
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "mapping_path": str(mapping_path),
+                "error": str(e),
+                "around_line_281": lines[276:286]
+            }
+        )
 @app.post("/fill")
 async def fill(request: Request):
     try:
