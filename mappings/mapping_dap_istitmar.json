@@ -1,0 +1,1194 @@
+{
+  "mapping_name": "mapping_dap_istitmar26_animation",
+  "version": "1.0",
+  "source_template": "[GO SIYAHA] DAP ISTITMAR26 - MaTPME (Animation) _ V23022026(1).docx",
+  "template_path_in_vercel": "templates/DAP_template.docx",
+  "mapping_path_in_vercel": "mappings/mapping_dap_istitmar.json",
+  "purpose": "Remplir le DAP GO SIYAHA ISTITMAR26 Animation en gardant le document Word original, via mapping externe.",
+  "important_note": "Ce mapping suppose une fonction API render_dap_with_mapping() capable de faire remplacement texte, remplissage de cellules/tableaux Word, cases à cocher et insertion d'images.",
+  "units": {
+    "montants": "MAD sauf mention KMAD/MMAD dans le libellé",
+    "ca_previsionnel": "KMAD",
+    "taille_marche": "MMAD/an",
+    "pourcentages": "format 35% ou 0.35 selon stratégie API; affichage recommandé en %"
+  },
+  "render_strategy_order": [
+    "replace_text_placeholders",
+    "fill_table_cells_by_position",
+    "fill_repeat_tables",
+    "replace_checkboxes",
+    "insert_or_generate_images",
+    "generate_expert_text_blocks_if_empty",
+    "cleanup_remaining_placeholders"
+  ],
+  "cleanup_placeholders": [
+    "Choisir",
+    "Choisir votre secteur",
+    "Choisir votre filière",
+    "Choisir votre partenaire",
+    "Introduire",
+    "Insérer votre ICE",
+    "XXXXXX",
+    "XXXXX",
+    "XXX",
+    "XX",
+    "X XXX",
+    "Raison sociale",
+    "Adresse - Ville",
+    "Nom et prénom",
+    "email@email.domaine",
+    "www.site.domaine",
+    "05XXXXXXXX",
+    "0600000000",
+    "0500000000"
+  ],
+  "scalar_text_replacements": [
+    {
+      "placeholder": "INV-XXX",
+      "field": "dossier.identifiant",
+      "default": "DOSSIER"
+    },
+    {
+      "placeholder": "INV-XXXX",
+      "field": "dossier.identifiant",
+      "default": "DOSSIER"
+    },
+    {
+      "placeholder": "MaSociété",
+      "field": "entreprise.raison_sociale",
+      "default": "SOCIETE"
+    },
+    {
+      "placeholder": "Click or tap to enter a date.",
+      "field": "dossier.date_dossier",
+      "default": ""
+    },
+    {
+      "placeholder": "Introduire le nom officiel déclaré au moment de la création",
+      "field": "entreprise.raison_sociale",
+      "default": ""
+    },
+    {
+      "placeholder": "Choisir une forme",
+      "field": "entreprise.forme_juridique",
+      "default": ""
+    },
+    {
+      "placeholder": "Introduire la date d’immatriculation au RC",
+      "field": "entreprise.date_creation",
+      "default": ""
+    },
+    {
+      "placeholder": "Choisir votre secteur",
+      "field": "entreprise.secteur_activite",
+      "default": ""
+    },
+    {
+      "placeholder": "Choisir votre type",
+      "field": "entreprise.type_activite",
+      "default": ""
+    },
+    {
+      "placeholder": "Choisir votre catégorie",
+      "field": "entreprise.categorie",
+      "default": ""
+    },
+    {
+      "placeholder": "XX XXX XXX MAD",
+      "field": "entreprise.capital_social_mad",
+      "format": "mad",
+      "default": ""
+    },
+    {
+      "placeholder": "Actionnaire A (50%) – Actionnaire B (50%)",
+      "field": "entreprise.actionnaires",
+      "default": ""
+    },
+    {
+      "placeholder": "XXXXXX - Ville",
+      "field": "entreprise.rc",
+      "default": ""
+    },
+    {
+      "placeholder": "Insérer votre ICE",
+      "field": "entreprise.ice",
+      "default": ""
+    },
+    {
+      "placeholder": "Numéro d’immatriculation à la CNSS",
+      "field": "entreprise.cnss",
+      "default": ""
+    },
+    {
+      "placeholder": "Adresse - Ville",
+      "field": "entreprise.adresse_siege",
+      "default": ""
+    },
+    {
+      "placeholder": "www.site.domaine",
+      "field": "entreprise.site_web",
+      "default": ""
+    },
+    {
+      "placeholder": "05XXXXXXXX",
+      "field": "entreprise.telephone",
+      "default": ""
+    },
+    {
+      "placeholder": "Nom et prénom",
+      "field": "dirigeant.nom",
+      "default": ""
+    },
+    {
+      "placeholder": "0600000000",
+      "field": "dirigeant.mobile",
+      "default": ""
+    },
+    {
+      "placeholder": "0500000000",
+      "field": "dirigeant.fixe",
+      "default": ""
+    },
+    {
+      "placeholder": "email@email.domaine",
+      "field": "dirigeant.email",
+      "default": ""
+    },
+    {
+      "placeholder": "(E.g., Construction et équipement d’un parc d’aventure, sur un site loué/acquis/en mise à disposition)",
+      "field": "projet.objet",
+      "default": ""
+    },
+    {
+      "placeholder": "Adresse conforme au contrat de bail ou titre foncier soumis",
+      "field": "projet.adresse_installations",
+      "default": ""
+    },
+    {
+      "placeholder": "Ville/Région",
+      "field": "projet.ville_region",
+      "default": ""
+    },
+    {
+      "placeholder": "700 m² - location, acquisition, mise à disposition, etc..",
+      "field": "projet.superficie_mode_occupation",
+      "default": ""
+    },
+    {
+      "placeholder": "Mois/année à mois/année",
+      "field": "projet.planning_realisation",
+      "default": ""
+    },
+    {
+      "placeholder": "Date prévue du lancement opérationnel du projet",
+      "field": "projet.date_demarrage_prevue",
+      "default": ""
+    },
+    {
+      "placeholder": "06 00 00 00 00",
+      "field": "projet.responsable_mobile",
+      "default": ""
+    },
+    {
+      "placeholder": "Choisir votre partenaire",
+      "field": "banque.nom",
+      "default": ""
+    },
+    {
+      "placeholder": "10 000 000  MAD",
+      "field": "projet.investissement_total",
+      "format": "mad",
+      "default": ""
+    },
+    {
+      "placeholder": "10 000 000  MAD",
+      "field": "projet.investissement_total",
+      "format": "mad",
+      "default": ""
+    }
+  ],
+  "table_cell_mappings": [
+    {
+      "table_index": 0,
+      "table_name": "Fiche signalétique de l’entreprise",
+      "row": 0,
+      "target": "right",
+      "field": "dossier.identifiant"
+    },
+    {
+      "table_index": 0,
+      "row": 1,
+      "target": "right",
+      "field": "entreprise.raison_sociale"
+    },
+    {
+      "table_index": 0,
+      "row": 2,
+      "target": "right",
+      "field": "entreprise.forme_juridique"
+    },
+    {
+      "table_index": 0,
+      "row": 3,
+      "target": "right",
+      "field": "entreprise.date_creation"
+    },
+    {
+      "table_index": 0,
+      "row": 4,
+      "target": "right",
+      "field": "entreprise.secteur_activite"
+    },
+    {
+      "table_index": 0,
+      "row": 5,
+      "target": "split_cells",
+      "fields": [
+        "entreprise.type_activite",
+        "entreprise.categorie"
+      ]
+    },
+    {
+      "table_index": 0,
+      "row": 6,
+      "target": "right",
+      "field": "entreprise.attestation_classement"
+    },
+    {
+      "table_index": 0,
+      "row": 6,
+      "target": "third_cell_append",
+      "field": "entreprise.date_attestation_classement"
+    },
+    {
+      "table_index": 0,
+      "row": 7,
+      "target": "third_cell_append",
+      "field": "entreprise.etat_avancement_attestation"
+    },
+    {
+      "table_index": 0,
+      "row": 8,
+      "target": "right",
+      "field": "entreprise.capital_social_mad",
+      "format": "mad"
+    },
+    {
+      "table_index": 0,
+      "row": 9,
+      "target": "right",
+      "field": "entreprise.actionnaires"
+    },
+    {
+      "table_index": 0,
+      "row": 10,
+      "target": "right",
+      "field": "entreprise.rc"
+    },
+    {
+      "table_index": 0,
+      "row": 11,
+      "target": "right",
+      "field": "entreprise.ice"
+    },
+    {
+      "table_index": 0,
+      "row": 12,
+      "target": "right",
+      "field": "entreprise.cnss"
+    },
+    {
+      "table_index": 0,
+      "row": 13,
+      "target": "right",
+      "field": "entreprise.adresse_siege"
+    },
+    {
+      "table_index": 0,
+      "row": 14,
+      "target": "right",
+      "field": "entreprise.adresse_site_implantation"
+    },
+    {
+      "table_index": 0,
+      "row": 15,
+      "target": "right",
+      "field": "entreprise.site_web"
+    },
+    {
+      "table_index": 0,
+      "row": 16,
+      "target": "right",
+      "field": "entreprise.telephone"
+    },
+    {
+      "table_index": 1,
+      "table_name": "Présentation du dirigeant",
+      "row": 0,
+      "target": "right",
+      "field": "dirigeant.nom"
+    },
+    {
+      "table_index": 1,
+      "row": 1,
+      "target": "right",
+      "field": "dirigeant.profil",
+      "generate_if_empty": true
+    },
+    {
+      "table_index": 1,
+      "row": 2,
+      "target": "right",
+      "field": "dirigeant.affaires_gerees"
+    },
+    {
+      "table_index": 1,
+      "row": 3,
+      "target": "right",
+      "field": "dirigeant.mobile"
+    },
+    {
+      "table_index": 1,
+      "row": 4,
+      "target": "right",
+      "field": "dirigeant.fixe"
+    },
+    {
+      "table_index": 1,
+      "row": 5,
+      "target": "right",
+      "field": "dirigeant.email"
+    },
+    {
+      "table_index": 2,
+      "table_name": "Projet de développement",
+      "row": 0,
+      "target": "right",
+      "field": "projet.filieres.0"
+    },
+    {
+      "table_index": 2,
+      "row": 1,
+      "target": "right",
+      "field": "projet.filieres.1"
+    },
+    {
+      "table_index": 2,
+      "row": 2,
+      "target": "right",
+      "field": "projet.filieres.2"
+    },
+    {
+      "table_index": 2,
+      "row": 3,
+      "target": "right",
+      "field": "projet.objet"
+    },
+    {
+      "table_index": 2,
+      "row": 4,
+      "target": "right",
+      "field": "projet.adresse_installations"
+    },
+    {
+      "table_index": 2,
+      "row": 5,
+      "target": "right",
+      "field": "projet.ville_region"
+    },
+    {
+      "table_index": 2,
+      "row": 6,
+      "target": "right",
+      "field": "projet.superficie_mode_occupation"
+    },
+    {
+      "table_index": 2,
+      "row": 7,
+      "target": "right",
+      "field": "projet.effectif"
+    },
+    {
+      "table_index": 2,
+      "row": 8,
+      "target": "right",
+      "field": "projet.planning_realisation"
+    },
+    {
+      "table_index": 2,
+      "row": 9,
+      "target": "right",
+      "field": "projet.date_demarrage_prevue"
+    },
+    {
+      "table_index": 2,
+      "row": 10,
+      "target": "right",
+      "field": "projet.responsable_nom"
+    },
+    {
+      "table_index": 2,
+      "row": 11,
+      "target": "right",
+      "field": "projet.responsable_mobile"
+    },
+    {
+      "table_index": 2,
+      "row": 12,
+      "target": "right",
+      "field": "banque.nom"
+    },
+    {
+      "table_index": 2,
+      "row": 13,
+      "target": "right",
+      "field": "projet.investissement_total",
+      "format": "mad"
+    },
+    {
+      "table_index": 3,
+      "table_name": "Synthèse du projet",
+      "row": 0,
+      "target": "right",
+      "field": "projet.secteur_activite_projet"
+    },
+    {
+      "table_index": 3,
+      "row": 1,
+      "target": "split_cells",
+      "fields": [
+        "projet.ecosystemes.0",
+        "projet.ecosystemes.1",
+        "projet.ecosystemes.2"
+      ]
+    },
+    {
+      "table_index": 3,
+      "row": 2,
+      "target": "split_cells",
+      "fields": [
+        "projet.activites_envisagees.0",
+        "projet.activites_envisagees.1",
+        "projet.activites_envisagees.2"
+      ]
+    },
+    {
+      "table_index": 3,
+      "row": 3,
+      "target": "right",
+      "field": "projet.description_offre_animation",
+      "generate_if_empty": true
+    },
+    {
+      "table_index": 3,
+      "row": 4,
+      "target": "split_cells",
+      "fields": [
+        "projet.fiches_projet.0",
+        "projet.fiches_projet.1"
+      ]
+    },
+    {
+      "table_index": 3,
+      "row": 5,
+      "target": "authorization_row",
+      "array": "projet.autorisations",
+      "array_index": 0
+    },
+    {
+      "table_index": 3,
+      "row": 6,
+      "target": "authorization_row",
+      "array": "projet.autorisations",
+      "array_index": 1
+    },
+    {
+      "table_index": 3,
+      "row": 7,
+      "target": "authorization_row",
+      "array": "projet.autorisations",
+      "array_index": 2
+    },
+    {
+      "table_index": 3,
+      "row": 8,
+      "target": "authorization_row",
+      "array": "projet.autorisations",
+      "array_index": 3
+    }
+  ],
+  "checkbox_mappings": [
+    {
+      "table_index": 2,
+      "row": 14,
+      "label": "Autofinancement",
+      "field": "financement_checkbox.autofinancement",
+      "checked_value": "☑",
+      "unchecked_value": "☐"
+    },
+    {
+      "table_index": 2,
+      "row": 14,
+      "label": "CMT",
+      "field": "financement_checkbox.cmt",
+      "checked_value": "☑",
+      "unchecked_value": "☐"
+    },
+    {
+      "table_index": 2,
+      "row": 15,
+      "label": "Financement participatif",
+      "field": "financement_checkbox.financement_participatif",
+      "checked_value": "☑",
+      "unchecked_value": "☐"
+    },
+    {
+      "table_index": 2,
+      "row": 15,
+      "label": "Crédit fournisseur",
+      "field": "financement_checkbox.credit_fournisseur",
+      "checked_value": "☑",
+      "unchecked_value": "☐"
+    },
+    {
+      "table_index": 2,
+      "row": 16,
+      "label": "Leasing",
+      "field": "financement_checkbox.leasing",
+      "checked_value": "☑",
+      "unchecked_value": "☐"
+    }
+  ],
+  "repeat_table_mappings": [
+    {
+      "table_index": 5,
+      "table_name": "Gamme envisagée de service",
+      "source_array": "gamme_services",
+      "start_row": 1,
+      "max_rows": 5,
+      "columns": [
+        {
+          "col": 0,
+          "field": "domaine_activite"
+        },
+        {
+          "col": 1,
+          "field": "description"
+        },
+        {
+          "col": 2,
+          "field": "marche_adressable"
+        },
+        {
+          "col": 3,
+          "field": "pourcentage_ca",
+          "format": "percent"
+        },
+        {
+          "col": 4,
+          "field": "image_slot",
+          "type": "image"
+        }
+      ],
+      "generate_defaults_if_empty": true
+    },
+    {
+      "table_index": 6,
+      "table_name": "Marchés ciblés",
+      "source_array": "marche_cibles",
+      "start_row": 2,
+      "row_step": 2,
+      "max_rows": 5,
+      "columns": [
+        {
+          "col": 0,
+          "field": "domaine_activite"
+        },
+        {
+          "col": 1,
+          "field": "marche_cible"
+        },
+        {
+          "col": 2,
+          "field": "taille_marche_mmad",
+          "format": "mmad_an"
+        },
+        {
+          "col": 3,
+          "field": "tcam",
+          "format": "percent"
+        }
+      ],
+      "source_row_columns": [
+        {
+          "col": 2,
+          "field": "source_taille_marche",
+          "prefix": "Source : "
+        },
+        {
+          "col": 3,
+          "field": "source_tcam",
+          "prefix": "Source : "
+        }
+      ],
+      "generate_defaults_if_empty": true
+    },
+    {
+      "table_index": 7,
+      "table_name": "Principaux concurrents TOP5",
+      "source_array": "concurrents",
+      "start_row": 2,
+      "max_rows": 5,
+      "columns": [
+        {
+          "col": 0,
+          "field": "nom"
+        },
+        {
+          "col": 1,
+          "field": "implantation"
+        },
+        {
+          "col": 2,
+          "field": "categorie"
+        },
+        {
+          "col": 3,
+          "field": "part_marche",
+          "format": "percent"
+        },
+        {
+          "col": 4,
+          "field": "principaux_services"
+        }
+      ],
+      "generate_defaults_if_empty": true
+    },
+    {
+      "table_index": 8,
+      "table_name": "Principaux fournisseurs TOP5",
+      "source_array": "fournisseurs",
+      "start_row": 2,
+      "max_rows": 5,
+      "columns": [
+        {
+          "col": 0,
+          "field": "nom"
+        },
+        {
+          "col": 1,
+          "field": "categorie"
+        },
+        {
+          "col": 2,
+          "field": "produits_services"
+        },
+        {
+          "col": 3,
+          "field": "part_achats",
+          "format": "percent"
+        },
+        {
+          "col": 4,
+          "field": "delai_reglement_jours"
+        },
+        {
+          "col": 5,
+          "field": "modalites_achat"
+        }
+      ],
+      "generate_defaults_if_empty": true
+    },
+    {
+      "table_index": 10,
+      "table_name": "Principaux créneaux/clients",
+      "source_array": "clients_creneaux",
+      "start_row": 1,
+      "max_rows": 5,
+      "columns": [
+        {
+          "col": 0,
+          "field": "creneau_service"
+        },
+        {
+          "col": 1,
+          "field": "principaux_clients"
+        },
+        {
+          "col": 2,
+          "field": "categorie"
+        },
+        {
+          "col": 3,
+          "field": "part_ca",
+          "format": "percent"
+        },
+        {
+          "col": 4,
+          "field": "delai_recouvrement_jours"
+        },
+        {
+          "col": 5,
+          "field": "modalites_vente"
+        }
+      ],
+      "generate_defaults_if_empty": true
+    },
+    {
+      "table_index": 11,
+      "table_name": "Politique de prix",
+      "source_array": "politique_prix",
+      "start_row": 2,
+      "max_rows": 5,
+      "columns": [
+        {
+          "col": 0,
+          "field": "famille_service"
+        },
+        {
+          "col": 1,
+          "field": "strategie_prix"
+        },
+        {
+          "col": 2,
+          "field": "commentaire"
+        }
+      ],
+      "generate_defaults_if_empty": true
+    },
+    {
+      "table_index": 13,
+      "table_name": "Capacité restauration classée",
+      "source_object": "capacite_restauration",
+      "start_row": 1,
+      "columns": [
+        {
+          "col": 0,
+          "field": "classement"
+        },
+        {
+          "col": 1,
+          "field": "superficie"
+        },
+        {
+          "col": 2,
+          "field": "capacite_physique"
+        },
+        {
+          "col": 3,
+          "field": "duree_cycle_service"
+        },
+        {
+          "col": 4,
+          "field": "prix_moyen_assiette"
+        },
+        {
+          "col": 5,
+          "field": "taux_occupation",
+          "format": "percent"
+        }
+      ]
+    },
+    {
+      "table_index": 15,
+      "table_name": "Capacité animation touristique",
+      "source_array": "capacites_animation",
+      "start_row": 1,
+      "max_rows": 6,
+      "columns": [
+        {
+          "col": 0,
+          "field": "domaine_activite"
+        },
+        {
+          "col": 1,
+          "field": "capacite_journaliere"
+        },
+        {
+          "col": 2,
+          "field": "duree_cycle_service"
+        },
+        {
+          "col": 3,
+          "field": "prix_moyen_service"
+        },
+        {
+          "col": 4,
+          "field": "taux_occupation",
+          "format": "percent"
+        }
+      ],
+      "generate_defaults_if_empty": true
+    },
+    {
+      "table_index": 16,
+      "table_name": "Chiffre d'affaires prévisionnel",
+      "source_array": "ca_previsionnel_dap.lignes",
+      "start_row": 1,
+      "max_rows": 5,
+      "columns": [
+        {
+          "col": 0,
+          "field": "libelle"
+        },
+        {
+          "col": 1,
+          "field": "taux_croissance",
+          "format": "percent"
+        },
+        {
+          "col": 2,
+          "field": "2026_kmad"
+        },
+        {
+          "col": 3,
+          "field": "2027_kmad"
+        },
+        {
+          "col": 4,
+          "field": "2028_kmad"
+        },
+        {
+          "col": 5,
+          "field": "2029_kmad"
+        },
+        {
+          "col": 6,
+          "field": "2030_kmad"
+        },
+        {
+          "col": 7,
+          "field": "2031_kmad"
+        }
+      ],
+      "total_row": {
+        "row": 6,
+        "columns": [
+          {
+            "col": 2,
+            "field": "ca_previsionnel_dap.total.2026_kmad"
+          },
+          {
+            "col": 3,
+            "field": "ca_previsionnel_dap.total.2027_kmad"
+          },
+          {
+            "col": 4,
+            "field": "ca_previsionnel_dap.total.2028_kmad"
+          },
+          {
+            "col": 5,
+            "field": "ca_previsionnel_dap.total.2029_kmad"
+          },
+          {
+            "col": 6,
+            "field": "ca_previsionnel_dap.total.2030_kmad"
+          },
+          {
+            "col": 7,
+            "field": "ca_previsionnel_dap.total.2031_kmad"
+          }
+        ]
+      }
+    },
+    {
+      "table_index": 17,
+      "table_name": "Emplois directs",
+      "source_array": "emplois_directs_profils",
+      "start_row": 2,
+      "max_rows": 6,
+      "columns": [
+        {
+          "col": 0,
+          "field": "profil_domaine"
+        },
+        {
+          "col": 1,
+          "field": "emplois_permanents"
+        },
+        {
+          "col": 2,
+          "field": "emplois_feminins"
+        },
+        {
+          "col": 3,
+          "field": "contrat_cdi"
+        },
+        {
+          "col": 4,
+          "field": "contrat_anapec"
+        }
+      ],
+      "total_row": {
+        "row": 8,
+        "columns": [
+          {
+            "col": 1,
+            "field": "emplois.total_permanents"
+          },
+          {
+            "col": 2,
+            "field": "emplois.total_feminins"
+          },
+          {
+            "col": 3,
+            "field": "emplois.total_cdi"
+          },
+          {
+            "col": 4,
+            "field": "emplois.total_anapec"
+          }
+        ]
+      }
+    },
+    {
+      "table_index": 20,
+      "table_name": "Recettes en devises",
+      "source_array": "recettes_devises",
+      "start_row": 2,
+      "max_rows": 2,
+      "columns": [
+        {
+          "col": 0,
+          "field": "devise"
+        },
+        {
+          "col": 1,
+          "field": "2027_kmad"
+        },
+        {
+          "col": 2,
+          "field": "2028_kmad"
+        },
+        {
+          "col": 3,
+          "field": "2029_kmad"
+        },
+        {
+          "col": 4,
+          "field": "2030_kmad"
+        }
+      ]
+    }
+  ],
+  "single_row_table_mappings": [
+    {
+      "table_index": 18,
+      "table_name": "Nombre prévisionnel d’intérimaire",
+      "target_col": 1,
+      "field": "emplois.nombre_interimaires"
+    },
+    {
+      "table_index": 19,
+      "table_name": "Emplois indirects",
+      "target_col": 1,
+      "field": "emplois.indirects",
+      "target_col_2": 2,
+      "field_2": "emplois.argumentaire_indirects",
+      "generate_field_2_if_empty": true
+    },
+    {
+      "table_index": 21,
+      "table_name": "Achats de l’entreprise effectués en devises",
+      "target_col": 1,
+      "field": "achats_devises.pourcentage_charges",
+      "target_col_2": 2,
+      "field_2": "achats_devises.commentaires"
+    }
+  ],
+  "paragraph_mappings": [
+    {
+      "search_contains": "Synthétiser l’étude de marché réalisée en mettant l’accent",
+      "field": "synthese_etude_marche",
+      "generate_if_empty": true,
+      "generation_role": "expert_market_study_summary"
+    },
+    {
+      "search_contains": "Décrire brièvement les principales contraintes liées aux fournisseurs",
+      "field": "strategie_approvisionnement.description",
+      "generate_if_empty": true,
+      "generation_role": "expert_supply_strategy"
+    },
+    {
+      "search_contains": "Décrire brièvement la stratégie commerciale de l’entreprise",
+      "field": "strategie_commerciale.description",
+      "generate_if_empty": true,
+      "generation_role": "expert_commercial_strategy"
+    },
+    {
+      "search_contains": "Décrire brièvement les facteurs de différenciation",
+      "field": "facteurs_differenciation",
+      "generate_if_empty": true,
+      "generation_role": "expert_differentiation_factors"
+    },
+    {
+      "search_contains": "Décrire succinctement l’attractivité touristique estimée",
+      "field": "attractivite_touristique",
+      "generate_if_empty": true,
+      "generation_role": "expert_tourism_attractiveness"
+    }
+  ],
+  "image_mappings": [
+    {
+      "table_index": 5,
+      "table_name": "Gamme envisagée de service",
+      "source_array": "gamme_services",
+      "start_row": 1,
+      "max_images": 5,
+      "target_col": 4,
+      "image_field": "image_path",
+      "prompt_field": "image_prompt",
+      "default_prompt_template": "Photo professionnelle réaliste pour dossier d'investissement GO SIYAHA : {domaine_activite}, {description}, site touristique moderne au Maroc, lumière naturelle, haute qualité, sans texte, sans logo, format paysage.",
+      "image_size": "1024x768",
+      "insert_width_cm": 4.5,
+      "insert_height_cm": 3.0,
+      "fallback_text": "Image illustrative à ajouter"
+    }
+  ],
+  "expert_generation_defaults": {
+    "dirigeant.profil": "Titulaire d’une formation supérieure et doté d’une expérience en gestion de projet, le dirigeant dispose des compétences nécessaires pour piloter le développement commercial, opérationnel et financier du projet.",
+    "projet.description_offre_animation": "Le projet vise à proposer une offre d’animation touristique structurée, combinant expérience client, sécurité, qualité de service et valorisation de l’attractivité locale.",
+    "synthese_etude_marche": "Le marché ciblé présente un potentiel lié à la dynamique touristique régionale, à l’évolution de la demande pour les expériences de loisirs et à la recherche d’offres différenciées. Le projet répond à un besoin d’animation complémentaire permettant d’améliorer l’expérience des visiteurs, d’augmenter la durée de séjour et de renforcer l’attractivité de la destination.",
+    "strategie_approvisionnement.description": "L’approvisionnement reposera sur une sélection de fournisseurs locaux et régionaux afin de garantir la disponibilité des intrants, la réactivité logistique et la maîtrise des coûts. L’entreprise privilégiera des partenaires offrant des conditions de qualité, de délai et de service compatibles avec les exigences d’exploitation.",
+    "strategie_commerciale.description": "La stratégie commerciale combinera une approche B2C à travers la clientèle touristique et locale, et une approche B2B via des partenariats avec hôtels, agences, transporteurs et opérateurs touristiques. La politique commerciale visera la visibilité digitale, les partenariats prescripteurs et la fidélisation.",
+    "facteurs_differenciation": "Le projet se différencie par la structuration de son offre, la qualité de l’expérience client, la localisation, la capacité à nouer des partenariats touristiques et l’intégration de standards de sécurité et de service adaptés à la clientèle nationale et internationale.",
+    "emplois.argumentaire_indirects": "Les emplois indirects seront générés principalement auprès des fournisseurs, sous-traitants, prestataires de transport, maintenance, communication, animation, petits travaux et services connexes liés à l’exploitation du projet.",
+    "attractivite_touristique": "Le projet contribuera à renforcer l’attractivité touristique de la destination en diversifiant les activités proposées aux visiteurs, en améliorant l’expérience de séjour et en créant une offre complémentaire aux circuits touristiques existants."
+  },
+  "ai_required_schema_additions": {
+    "gamme_services": [
+      {
+        "domaine_activite": "",
+        "description": "",
+        "marche_adressable": "",
+        "pourcentage_ca": "",
+        "image_prompt": "",
+        "image_path": ""
+      }
+    ],
+    "marche_cibles": [
+      {
+        "domaine_activite": "",
+        "marche_cible": "",
+        "taille_marche_mmad": "",
+        "tcam": "",
+        "source_taille_marche": "",
+        "source_tcam": ""
+      }
+    ],
+    "concurrents": [
+      {
+        "nom": "",
+        "implantation": "",
+        "categorie": "",
+        "part_marche": "",
+        "principaux_services": ""
+      }
+    ],
+    "fournisseurs": [
+      {
+        "nom": "",
+        "categorie": "",
+        "produits_services": "",
+        "part_achats": "",
+        "delai_reglement_jours": "",
+        "modalites_achat": ""
+      }
+    ],
+    "clients_creneaux": [
+      {
+        "creneau_service": "",
+        "principaux_clients": "",
+        "categorie": "",
+        "part_ca": "",
+        "delai_recouvrement_jours": "",
+        "modalites_vente": ""
+      }
+    ],
+    "politique_prix": [
+      {
+        "famille_service": "",
+        "strategie_prix": "",
+        "commentaire": ""
+      }
+    ],
+    "capacites_animation": [
+      {
+        "domaine_activite": "",
+        "capacite_journaliere": "",
+        "duree_cycle_service": "",
+        "prix_moyen_service": "",
+        "taux_occupation": ""
+      }
+    ],
+    "ca_previsionnel_dap": {
+      "lignes": [],
+      "total": {}
+    },
+    "emplois_directs_profils": [],
+    "recettes_devises": [],
+    "achats_devises": {
+      "pourcentage_charges": "",
+      "commentaires": ""
+    }
+  },
+  "validation_rules": [
+    {
+      "field": "entreprise.raison_sociale",
+      "required": true
+    },
+    {
+      "field": "entreprise.rc",
+      "required": true
+    },
+    {
+      "field": "entreprise.ice",
+      "required": true
+    },
+    {
+      "field": "dirigeant.nom",
+      "required": true
+    },
+    {
+      "field": "projet.objet",
+      "required": true
+    },
+    {
+      "field": "projet.ville_region",
+      "required": true
+    },
+    {
+      "field": "projet.investissement_total",
+      "required": true
+    },
+    {
+      "field": "banque.nom",
+      "required_if": "projet.mode_financement.credit_bancaire > 0"
+    },
+    {
+      "field": "gamme_services",
+      "min_items": 1,
+      "recommended_items": 5
+    },
+    {
+      "field": "marche_cibles",
+      "min_items": 1,
+      "recommended_items": 5
+    },
+    {
+      "field": "concurrents",
+      "min_items": 3,
+      "recommended_items": 5
+    },
+    {
+      "field": "fournisseurs",
+      "min_items": 3,
+      "recommended_items": 5
+    },
+    {
+      "field": "clients_creneaux",
+      "min_items": 3,
+      "recommended_items": 5
+    }
+  ]
+}
