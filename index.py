@@ -6,6 +6,7 @@ from pathlib import Path
 from jinja2 import Environment, ChainableUndefined
 from docx import Document
 from docx.table import _Cell
+from docx.shared import Cm
 import tempfile
 import zipfile
 import uuid
@@ -33,6 +34,10 @@ MAPPING_DIR = BASE_DIR / "mappings"
 DOCX_JINJA_ENV = Environment(undefined=ChainableUndefined)
 
 
+# =========================================================
+# OUTILS GÉNÉRAUX
+# =========================================================
+
 def safe_name(value):
     if not value:
         return "DOSSIER"
@@ -49,10 +54,32 @@ def deep_get(data, path, default=""):
     for part in str(path).split("."):
         if isinstance(current, dict):
             current = current.get(part, default)
+        elif isinstance(current, list):
+            try:
+                current = current[int(part)]
+            except Exception:
+                return default
         else:
             return default
 
     return current if current is not None else default
+
+
+def get_context_value(context, path, default=""):
+    value = deep_get(context, path, None)
+
+    if value is not None and value != "":
+        return value
+
+    dap = context.get("dap", {})
+
+    if isinstance(dap, dict):
+        value = deep_get(dap, path, None)
+
+        if value is not None and value != "":
+            return value
+
+    return default
 
 
 def to_number(value):
@@ -79,6 +106,37 @@ def to_number(value):
         return 0
 
 
+def format_display_value(value, fmt=None):
+    if value is None:
+        return ""
+
+    if fmt in ["mad", "money"]:
+        n = to_number(value)
+        if n == 0:
+            return ""
+        return f"{n:,.0f}".replace(",", " ") + " MAD"
+
+    if fmt == "percent":
+        n = to_number(value)
+        if n == 0:
+            return ""
+        if n <= 1:
+            n = n * 100
+        return f"{n:.0f}%"
+
+    if fmt == "mmad_an":
+        n = to_number(value)
+        if n == 0:
+            return ""
+        return f"{n:,.1f}".replace(",", " ") + " MMAD/an"
+
+    if fmt in ["number", "integer", "float"]:
+        n = to_number(value)
+        return str(int(n)) if n == int(n) else str(n)
+
+    return str(value)
+
+
 def normalize_value(value, value_type="text"):
     if value_type in ["number", "integer", "float"]:
         return to_number(value)
@@ -86,12 +144,15 @@ def normalize_value(value, value_type="text"):
     if value_type == "boolean":
         return bool(value)
 
-    if value_type == "money":
-        n = to_number(value)
-        return f"{n:,.0f}".replace(",", " ")
+    if value_type in ["money", "mad"]:
+        return format_display_value(value, "mad")
 
     return value if value is not None else ""
 
+
+# =========================================================
+# CONTEXTE PAR DÉFAUT
+# =========================================================
 
 def add_docx_defaults(context):
     context.setdefault("dossier", {})
@@ -156,6 +217,8 @@ def add_docx_defaults(context):
         "classement": "",
         "categorie_classement": "",
         "type_categorie": "",
+        "type_activite": "",
+        "categorie": "",
         "secteur": "",
         "secteur_activite": "",
 
@@ -166,6 +229,7 @@ def add_docx_defaults(context):
         "fonction": "",
         "mobile": "",
         "gsm": "",
+        "fixe": "",
         "telephone_fixe": "",
         "profil": "",
         "affaires_gerees": "",
@@ -188,6 +252,7 @@ def add_docx_defaults(context):
         "ecosystemes": "",
         "activites_envisagees": "",
         "offre_animation": "",
+        "description_offre_animation": "",
         "fiches_projet": "",
         "autorisations": "",
         "biens_services_produits": "",
@@ -199,13 +264,18 @@ def add_docx_defaults(context):
         "titre_foncier": "",
         "statut_foncier": "",
         "surface_mode_occupation": "",
+        "superficie_mode_occupation": "",
         "planning_realisation": "",
         "date_demarrage_prevue": "",
         "annee_demarrage": "",
         "responsable_projet": "",
+        "responsable_nom": "",
         "responsable_mobile": "",
+        "secteur_activite_projet": "",
         "role_region": "",
         "role_balance_commerciale": "",
+        "facteurs_differenciation": "",
+        "attractivite_touristique": "",
 
         "banque_partenaire": "",
         "banque": "",
@@ -256,27 +326,22 @@ def add_docx_defaults(context):
 
     context["dirigeant"].setdefault("fonction", context["dirigeant"].get("qualite", ""))
     context["dirigeant"].setdefault("gsm", context["dirigeant"].get("mobile", ""))
+    context["dirigeant"].setdefault("fixe", context["dirigeant"].get("telephone_fixe", ""))
 
     context["projet"].setdefault("objectif", context["projet"].get("objet", ""))
     context["projet"].setdefault("description", context["projet"].get("objet", ""))
-    context["projet"].setdefault(
-        "investissement_total_mad",
-        context["projet"].get("investissement_total", 0)
-    )
+    context["projet"].setdefault("investissement_total_mad", context["projet"].get("investissement_total", 0))
     context["projet"].setdefault("adresse_site", context["projet"].get("adresse_installations", ""))
     context["projet"].setdefault("secteur", context["projet"].get("branche_activite", ""))
+    context["projet"].setdefault("secteur_activite_projet", context["projet"].get("secteur", "Animation touristique"))
+    context["projet"].setdefault("responsable_nom", context["dirigeant"].get("nom", ""))
+    context["projet"].setdefault("responsable_mobile", context["dirigeant"].get("mobile", ""))
 
     context["banque"].setdefault("banque_partenaire", context["banque"].get("nom", ""))
-    context["banque"].setdefault(
-        "forme_juridique",
-        context["banque"].get("forme_juridique_banque", "Société Anonyme")
-    )
+    context["banque"].setdefault("forme_juridique", context["banque"].get("forme_juridique_banque", "Société Anonyme"))
     context["banque"].setdefault(
         "capital",
-        context["banque"].get(
-            "capital_social",
-            context["banque"].get("capital_social_banque", "")
-        )
+        context["banque"].get("capital_social", context["banque"].get("capital_social_banque", ""))
     )
     context["banque"].setdefault("siege", context["banque"].get("siege_social", ""))
 
@@ -331,7 +396,7 @@ def apply_simple_mappings(wb, context, mappings):
             continue
 
         ws = wb[sheet_name]
-        value = deep_get(context, field, "")
+        value = get_context_value(context, field, "")
         write_cell(ws, cell_ref, value, value_type)
 
 
@@ -452,7 +517,7 @@ def render_bp_excel(output_path, context):
 
 
 # =========================================================
-# WORD / DAP ROBUSTE
+# WORD / OUTILS ROBUSTES
 # =========================================================
 
 def normalize_label(text):
@@ -470,12 +535,6 @@ def safe_table_rows(table):
 
 
 def safe_row_cells(row, table):
-    """
-    Corrige l'erreur python-docx :
-    no tc element at grid_offset=0
-
-    Cette erreur arrive dans les tableaux Word avec cellules fusionnées.
-    """
     try:
         return list(row.cells)
     except Exception:
@@ -485,11 +544,57 @@ def safe_row_cells(row, table):
             return []
 
 
+def get_table_by_index(doc, index):
+    try:
+        return doc.tables[int(index)]
+    except Exception:
+        return None
+
+
+def iter_all_paragraphs(doc):
+    for paragraph in doc.paragraphs:
+        yield paragraph
+
+    for table in doc.tables:
+        rows = safe_table_rows(table)
+
+        for row in rows:
+            cells = safe_row_cells(row, table)
+
+            for cell in cells:
+                try:
+                    for paragraph in cell.paragraphs:
+                        yield paragraph
+                except Exception:
+                    continue
+
+
 def set_cell_value(cell, value):
     try:
         cell.text = "" if value is None else str(value)
     except Exception:
         pass
+
+
+def set_paragraph_text(paragraph, value):
+    try:
+        paragraph.text = "" if value is None else str(value)
+    except Exception:
+        pass
+
+
+def replace_text_everywhere(doc, search, replace):
+    if not search:
+        return
+
+    replace = "" if replace is None else str(replace)
+
+    for paragraph in iter_all_paragraphs(doc):
+        try:
+            if search in paragraph.text:
+                paragraph.text = paragraph.text.replace(search, replace)
+        except Exception:
+            continue
 
 
 def fill_cell_next_to_label(doc, label, value, position="right", occurrence=1):
@@ -538,30 +643,6 @@ def fill_cell_next_to_label(doc, label, value, position="right", occurrence=1):
     return False
 
 
-def replace_text_everywhere(doc, search, replace):
-    replace = "" if replace is None else str(replace)
-
-    for paragraph in doc.paragraphs:
-        try:
-            if search in paragraph.text:
-                paragraph.text = paragraph.text.replace(search, replace)
-        except Exception:
-            continue
-
-    for table in doc.tables:
-        rows = safe_table_rows(table)
-
-        for row in rows:
-            cells = safe_row_cells(row, table)
-
-            for cell in cells:
-                try:
-                    if search in cell.text:
-                        cell.text = cell.text.replace(search, replace)
-                except Exception:
-                    continue
-
-
 def find_docx_table(doc, anchor_label):
     anchor = normalize_label(anchor_label)
 
@@ -586,141 +667,475 @@ def find_docx_table(doc, anchor_label):
     return None
 
 
-def apply_docx_table_mappings(doc, context, table_mappings):
-    for mapping in table_mappings:
-        table_label = mapping.get("table_label") or mapping.get("anchor_label") or mapping.get("label")
-        source_array = mapping.get("source_array", "")
-        columns = mapping.get("columns", [])
-        start_row = mapping.get("start_row", mapping.get("start_row_index", 0))
+# =========================================================
+# DAP AVANCÉ
+# =========================================================
 
-        if not table_label or not source_array or not columns:
+def get_expert_default(mapping, field):
+    defaults = mapping.get("expert_generation_defaults", {})
+
+    if field in defaults:
+        return defaults[field]
+
+    return ""
+
+
+def generate_default_rows(source_array, context):
+    projet = context.get("projet", {})
+    entreprise = context.get("entreprise", {})
+    emplois = context.get("emplois", {})
+
+    objet = projet.get("objet") or projet.get("description") or "activité touristique"
+    ville = projet.get("ville_region") or "la région ciblée"
+    ca = to_number(projet.get("ca_prevu_annee_1", 0))
+    effectif = int(to_number(projet.get("effectif") or emplois.get("directs") or 5))
+
+    if source_array == "gamme_services":
+        return [
+            {
+                "domaine_activite": "Animation touristique",
+                "description": objet,
+                "marche_adressable": f"Touristes et clientèle locale à {ville}",
+                "pourcentage_ca": "100%",
+                "image_slot": "Image illustrative à ajouter",
+            }
+        ]
+
+    if source_array == "marche_cibles":
+        return [
+            {
+                "domaine_activite": "Animation touristique",
+                "marche_cible": "Touristes nationaux et internationaux",
+                "taille_marche_mmad": "",
+                "tcam": "",
+                "source_taille_marche": "Estimation interne",
+                "source_tcam": "Estimation interne",
+            }
+        ]
+
+    if source_array == "concurrents":
+        return [
+            {
+                "nom": "Opérateurs locaux",
+                "implantation": ville,
+                "categorie": "Concurrence directe/indirecte",
+                "part_marche": "",
+                "principaux_services": "Activités touristiques et loisirs",
+            }
+        ]
+
+    if source_array == "fournisseurs":
+        return [
+            {
+                "nom": "Fournisseurs locaux",
+                "categorie": "Équipements et consommables",
+                "produits_services": "Matériel, maintenance, services opérationnels",
+                "part_achats": "",
+                "delai_reglement_jours": "30",
+                "modalites_achat": "Devis, bon de commande et règlement selon conditions négociées",
+            }
+        ]
+
+    if source_array == "clients_creneaux":
+        return [
+            {
+                "creneau_service": "Clientèle touristique",
+                "principaux_clients": "Touristes nationaux, touristes étrangers, familles et groupes",
+                "categorie": "B2C/B2B",
+                "part_ca": "100%",
+                "delai_recouvrement_jours": "0",
+                "modalites_vente": "Paiement comptant, réservation en ligne et partenariats",
+            }
+        ]
+
+    if source_array == "politique_prix":
+        return [
+            {
+                "famille_service": "Animation touristique",
+                "strategie_prix": "Prix aligné sur le marché avec différenciation par qualité d’expérience",
+                "commentaire": "Tarification modulable selon saison, groupes et partenariats touristiques",
+            }
+        ]
+
+    if source_array == "capacites_animation":
+        return [
+            {
+                "domaine_activite": "Animation touristique",
+                "capacite_journaliere": "À préciser",
+                "duree_cycle_service": "À préciser",
+                "prix_moyen_service": "À préciser",
+                "taux_occupation": "50%",
+            }
+        ]
+
+    if source_array == "emplois_directs_profils":
+        return [
+            {
+                "profil_domaine": "Exploitation et animation",
+                "emplois_permanents": effectif,
+                "emplois_feminins": "",
+                "contrat_cdi": effectif,
+                "contrat_anapec": "",
+            }
+        ]
+
+    if source_array == "ca_previsionnel_dap.lignes":
+        return [
+            {
+                "libelle": "Animation touristique",
+                "taux_croissance": format_display_value(projet.get("croissance_ca", 0.15), "percent"),
+                "2026_kmad": round(ca / 1000) if ca else "",
+                "2027_kmad": round(ca * 1.15 / 1000) if ca else "",
+                "2028_kmad": round(ca * 1.15**2 / 1000) if ca else "",
+                "2029_kmad": round(ca * 1.15**3 / 1000) if ca else "",
+                "2030_kmad": round(ca * 1.15**4 / 1000) if ca else "",
+                "2031_kmad": round(ca * 1.15**5 / 1000) if ca else "",
+            }
+        ]
+
+    return []
+
+
+def get_source_array(context, source_array, mapping_item=None):
+    data = get_context_value(context, source_array, None)
+
+    if isinstance(data, list):
+        return data
+
+    if isinstance(data, dict):
+        return [data]
+
+    if mapping_item and mapping_item.get("generate_defaults_if_empty"):
+        return generate_default_rows(source_array, context)
+
+    generated = generate_default_rows(source_array, context)
+
+    if generated:
+        return generated
+
+    return []
+
+
+def apply_scalar_text_replacements(doc, context, mapping):
+    for item in mapping.get("scalar_text_replacements", []):
+        placeholder = item.get("placeholder")
+        field = item.get("field")
+        fmt = item.get("format") or item.get("type")
+
+        if not placeholder:
             continue
 
-        table = find_docx_table(doc, table_label)
+        value = get_context_value(context, field, item.get("default", "")) if field else item.get("replacement", "")
+
+        if value in [None, ""]:
+            value = item.get("default", "")
+
+        value = format_display_value(value, fmt)
+        replace_text_everywhere(doc, placeholder, value)
+
+
+def apply_table_cell_mappings(doc, context, mapping):
+    for item in mapping.get("table_cell_mappings", []):
+        table = get_table_by_index(doc, item.get("table_index"))
 
         if table is None:
             continue
 
-        try:
-            start_idx = int(start_row)
-        except Exception:
-            start_idx = 0
+        rows = safe_table_rows(table)
+        row_idx = int(item.get("row", 0))
 
-        if mapping.get("one_based", True) and start_idx > 0:
-            start_idx -= 1
+        if row_idx < 0 or row_idx >= len(rows):
+            continue
 
-        rows_data = deep_get(context, source_array, [])
+        cells = safe_row_cells(rows[row_idx], table)
 
-        if not isinstance(rows_data, list):
+        if not cells:
+            continue
+
+        target = item.get("target", "right")
+        fmt = item.get("format") or item.get("type")
+
+        if target == "split_cells":
+            fields = item.get("fields", [])
+
+            for i, field in enumerate(fields):
+                cell_idx = i + 1
+
+                if cell_idx < len(cells):
+                    value = get_context_value(context, field, "")
+                    set_cell_value(cells[cell_idx], format_display_value(value, fmt))
+
+            continue
+
+        if target == "third_cell_append":
+            field = item.get("field")
+            value = get_context_value(context, field, "")
+
+            if len(cells) >= 3 and value not in ["", None]:
+                old = cells[2].text.strip()
+                new_text = (old + " " + format_display_value(value, fmt)).strip()
+                set_cell_value(cells[2], new_text)
+
+            continue
+
+        if target == "authorization_row":
+            array_path = item.get("array")
+            array_index = int(item.get("array_index", 0))
+            rows_data = get_source_array(context, array_path)
+
+            if 0 <= array_index < len(rows_data):
+                row_data = rows_data[array_index]
+
+                if isinstance(row_data, dict):
+                    value = " | ".join(str(v) for v in row_data.values() if v not in ["", None])
+                else:
+                    value = str(row_data)
+
+                if len(cells) > 1:
+                    set_cell_value(cells[1], value)
+
+            continue
+
+        field = item.get("field")
+        value = get_context_value(context, field, "")
+
+        if item.get("generate_if_empty") and value in ["", None]:
+            value = get_expert_default(mapping, field)
+
+        value = format_display_value(value, fmt)
+
+        if target == "right":
+            target_idx = 1 if len(cells) > 1 else 0
+        else:
+            target_idx = 1 if len(cells) > 1 else 0
+
+        set_cell_value(cells[target_idx], value)
+
+
+def fill_image_cell(cell, image_path, fallback_text, width_cm=4.5, height_cm=3.0):
+    if image_path:
+        p = Path(str(image_path))
+
+        if p.exists():
+            try:
+                cell.text = ""
+                paragraph = cell.paragraphs[0]
+                run = paragraph.add_run()
+                run.add_picture(str(p), width=Cm(float(width_cm)), height=Cm(float(height_cm)))
+                return
+            except Exception:
+                pass
+
+    set_cell_value(cell, fallback_text or "Image illustrative à ajouter")
+
+
+def apply_repeat_table_mappings(doc, context, mapping):
+    image_settings_by_table = {}
+
+    for img in mapping.get("image_mappings", []):
+        if "table_index" in img:
+            image_settings_by_table[int(img["table_index"])] = img
+
+    for item in mapping.get("repeat_table_mappings", []):
+        table = get_table_by_index(doc, item.get("table_index"))
+
+        if table is None:
+            continue
+
+        rows = safe_table_rows(table)
+        source_array = item.get("source_array", "")
+        data_rows = get_source_array(context, source_array, item)
+
+        if not data_rows:
+            continue
+
+        start_row = int(item.get("start_row", 0))
+        row_step = int(item.get("row_step", 1))
+        max_rows = int(item.get("max_rows", len(data_rows)))
+        columns = item.get("columns", [])
+
+        for i, row_data in enumerate(data_rows[:max_rows]):
+            row_idx = start_row + i * row_step
+
+            if row_idx >= len(rows):
+                break
+
+            cells = safe_row_cells(rows[row_idx], table)
+
+            for col in columns:
+                col_idx = col.get("col", col.get("index", col.get("column_index")))
+                field = col.get("field")
+                fmt = col.get("format") or col.get("type")
+
+                try:
+                    col_idx = int(col_idx)
+                except Exception:
+                    continue
+
+                if col_idx < 0 or col_idx >= len(cells):
+                    continue
+
+                if col.get("type") == "image":
+                    img_conf = image_settings_by_table.get(int(item.get("table_index", -1)), {})
+                    image_field = img_conf.get("image_field", field)
+                    image_path = row_data.get(image_field, "")
+                    fallback = img_conf.get("fallback_text", "Image illustrative à ajouter")
+                    fill_image_cell(
+                        cells[col_idx],
+                        image_path,
+                        fallback,
+                        img_conf.get("insert_width_cm", 4.5),
+                        img_conf.get("insert_height_cm", 3.0),
+                    )
+                    continue
+
+                value = row_data.get(field, "")
+                set_cell_value(cells[col_idx], format_display_value(value, fmt))
+
+            source_row_columns = item.get("source_row_columns", [])
+
+            if source_row_columns and row_step >= 2 and row_idx + 1 < len(rows):
+                source_cells = safe_row_cells(rows[row_idx + 1], table)
+
+                for src in source_row_columns:
+                    col_idx = src.get("col")
+                    field = src.get("field")
+                    prefix = src.get("prefix", "")
+
+                    try:
+                        col_idx = int(col_idx)
+                    except Exception:
+                        continue
+
+                    if col_idx < 0 or col_idx >= len(source_cells):
+                        continue
+
+                    value = row_data.get(field, "")
+
+                    if value not in ["", None]:
+                        set_cell_value(source_cells[col_idx], prefix + str(value))
+
+        total_row = item.get("total_row")
+
+        if isinstance(total_row, dict):
+            row_idx = int(total_row.get("row", 0))
+
+            if 0 <= row_idx < len(rows):
+                cells = safe_row_cells(rows[row_idx], table)
+
+                for col in total_row.get("columns", []):
+                    col_idx = col.get("col")
+                    field = col.get("field")
+                    fmt = col.get("format") or col.get("type")
+
+                    try:
+                        col_idx = int(col_idx)
+                    except Exception:
+                        continue
+
+                    if col_idx < 0 or col_idx >= len(cells):
+                        continue
+
+                    value = get_context_value(context, field, "")
+
+                    if value not in ["", None]:
+                        set_cell_value(cells[col_idx], format_display_value(value, fmt))
+
+
+def apply_single_row_table_mappings(doc, context, mapping):
+    for item in mapping.get("single_row_table_mappings", []):
+        table = get_table_by_index(doc, item.get("table_index"))
+
+        if table is None:
             continue
 
         rows = safe_table_rows(table)
 
-        for i, row_data in enumerate(rows_data):
-            r = start_idx + i
+        if not rows:
+            continue
 
-            if r >= len(rows):
-                break
+        row_idx = int(item.get("row", 1))
 
-            cells = safe_row_cells(rows[r], table)
+        if row_idx >= len(rows):
+            row_idx = 0
 
-            for col in columns:
-                idx = col.get("index", col.get("column_index", col.get("col")))
-                field = col.get("field")
+        cells = safe_row_cells(rows[row_idx], table)
 
-                if idx is None or field is None:
-                    continue
+        target_col = item.get("target_col")
+        field = item.get("field")
 
-                try:
-                    idx = int(idx)
-                except Exception:
-                    continue
+        try:
+            target_col = int(target_col)
+        except Exception:
+            target_col = None
 
-                if idx < 0 or idx >= len(cells):
-                    continue
+        if target_col is not None and 0 <= target_col < len(cells):
+            value = get_context_value(context, field, "")
+            set_cell_value(cells[target_col], format_display_value(value, item.get("format")))
 
-                try:
-                    value = row_data.get(field, "")
-                    set_cell_value(cells[idx], value)
-                except Exception:
-                    continue
+        target_col_2 = item.get("target_col_2")
+        field_2 = item.get("field_2")
+
+        try:
+            target_col_2 = int(target_col_2)
+        except Exception:
+            target_col_2 = None
+
+        if target_col_2 is not None and 0 <= target_col_2 < len(cells):
+            value_2 = get_context_value(context, field_2, "")
+
+            if item.get("generate_field_2_if_empty") and value_2 in ["", None]:
+                value_2 = get_expert_default(mapping, field_2)
+
+            set_cell_value(cells[target_col_2], value_2)
 
 
-def apply_dap_default_mappings(doc, context):
-    default_mappings = [
-        {"label": "Identifiant", "field": "dossier.identifiant"},
-        {"label": "Raison sociale", "field": "entreprise.raison_sociale"},
-        {"label": "Forme juridique", "field": "entreprise.forme_juridique"},
-        {"label": "Date de création", "field": "entreprise.date_creation"},
-        {"label": "Secteur d’activité", "field": "entreprise.activite"},
-        {"label": "Type et Catégorie", "field": "entreprise.type_categorie"},
-        {"label": "Attestation de classement", "field": "entreprise.attestation_classement"},
-        {"label": "Capital social (MAD)", "field": "entreprise.capital_social_mad"},
-        {"label": "Actionnaires (%)", "field": "entreprise.actionnaires"},
-        {"label": "Registre de commerce", "field": "entreprise.rc"},
-        {"label": "Identifiant Commun de l'Entreprise", "field": "entreprise.ice"},
-        {"label": "CNSS", "field": "entreprise.cnss"},
-        {"label": "Adresse du siège social", "field": "entreprise.adresse_siege"},
-        {"label": "Adresse du site d’implantation", "field": "projet.adresse_site"},
-        {"label": "Site Web", "field": "entreprise.site_web"},
-        {"label": "Tél.", "field": "entreprise.telephone", "occurrence": 1},
+def apply_paragraph_mappings(doc, context, mapping):
+    for item in mapping.get("paragraph_mappings", []):
+        search = item.get("search_contains")
+        field = item.get("field")
 
-        {"label": "Dirigeant", "field": "dirigeant.nom"},
-        {"label": "Profil", "field": "dirigeant.profil"},
-        {"label": "Affaire(s) gérée(s) par le dirigeant", "field": "dirigeant.affaires_gerees"},
-        {"label": "Mobile (Cellulaire)", "field": "dirigeant.mobile", "occurrence": 1},
-        {"label": "Fixe (Tél.)", "field": "dirigeant.telephone_fixe"},
-        {"label": "Courrier électronique", "field": "dirigeant.email"},
+        if not search or not field:
+            continue
 
-        {"label": "Filière(s) du projet", "field": "projet.filieres"},
-        {"label": "Objet du projet", "field": "projet.objet"},
-        {"label": "Adresse des installations", "field": "projet.adresse_installations"},
-        {"label": "Ville/Région du Projet", "field": "projet.ville_region"},
-        {"label": "Superficie et mode d’occupation du site", "field": "projet.surface_mode_occupation"},
-        {"label": "Effectif à embaucher", "field": "projet.effectif"},
-        {"label": "Planning de réalisation", "field": "projet.planning_realisation"},
-        {"label": "Date prévue de démarrage", "field": "projet.date_demarrage_prevue"},
-        {"label": "Responsable de projet", "field": "projet.responsable_projet"},
-        {"label": "Mobile (Cellulaire) du resp. de projet", "field": "projet.responsable_mobile"},
-        {"label": "Partenaire financier", "field": "banque.nom"},
-        {"label": "Investissement total", "field": "projet.investissement_total"},
-        {"label": "Secteur d’activité du projet", "field": "projet.secteur"},
-    ]
+        value = get_context_value(context, field, "")
 
-    for item in default_mappings:
-        value = deep_get(context, item["field"], "")
+        if item.get("generate_if_empty") and value in ["", None]:
+            value = get_expert_default(mapping, field)
 
-        if value not in ["", None, 0]:
-            fill_cell_next_to_label(
-                doc,
-                item["label"],
-                value,
-                item.get("position", "right"),
-                int(item.get("occurrence", 1)),
-            )
+        if value in ["", None]:
+            continue
 
-    checkbox_values = {
-        "Autofinancement": deep_get(context, "financement_checkbox.autofinancement", "☐"),
-        "CMT": deep_get(context, "financement_checkbox.cmt", "☐"),
-        "Financement participatif": deep_get(context, "financement_checkbox.financement_participatif", "☐"),
-        "Crédit fournisseur": deep_get(context, "financement_checkbox.credit_fournisseur", "☐"),
-        "Leasing": deep_get(context, "financement_checkbox.leasing", "☐"),
-    }
+        search_norm = normalize_label(search)
 
-    for label, mark in checkbox_values.items():
+        for paragraph in iter_all_paragraphs(doc):
+            try:
+                if search_norm in normalize_label(paragraph.text):
+                    set_paragraph_text(paragraph, value)
+            except Exception:
+                continue
+
+
+def apply_checkbox_mappings(doc, context, mapping):
+    for item in mapping.get("checkbox_mappings", []):
+        label = item.get("label")
+        field = item.get("field")
+
+        if not label or not field:
+            continue
+
+        raw = get_context_value(context, field, "☐")
+        checked = raw is True or str(raw).strip() in ["☑", "true", "True", "1", "oui", "Oui"]
+
+        checked_value = item.get("checked_value", "☑")
+        unchecked_value = item.get("unchecked_value", "☐")
+        mark = checked_value if checked else unchecked_value
+
         replace_text_everywhere(doc, f"☐ {label}", f"{mark} {label}")
+        replace_text_everywhere(doc, f"□ {label}", f"{mark} {label}")
 
 
-def apply_dap_mapping_file(doc, context):
-    mapping_path = MAPPING_DIR / "mapping_dap_istitmar.json"
-
-    if not mapping_path.exists():
-        apply_dap_default_mappings(doc, context)
-        return
-
-    with open(mapping_path, "r", encoding="utf-8") as f:
-        mapping = json.load(f)
-
+def apply_legacy_label_mappings(doc, context, mapping):
     label_mappings = (
         mapping.get("cell_mappings", [])
         + mapping.get("label_mappings", [])
@@ -737,25 +1152,15 @@ def apply_dap_mapping_file(doc, context):
         if not label or not field:
             continue
 
-        value = normalize_value(deep_get(context, field, ""), value_type)
+        value = normalize_value(get_context_value(context, field, ""), value_type)
 
         if value in ["", None]:
             continue
 
         fill_cell_next_to_label(doc, label, value, position, occurrence)
 
-    for item in mapping.get("checkbox_mappings", []):
-        label = item.get("label")
-        field = item.get("field")
 
-        if not label or not field:
-            continue
-
-        mark = deep_get(context, field, "☐")
-        checked = mark is True or str(mark).strip() in ["☑", "true", "True", "1", "oui", "Oui"]
-
-        replace_text_everywhere(doc, f"☐ {label}", f"{'☑' if checked else '☐'} {label}")
-
+def apply_legacy_text_replacements(doc, context, mapping):
     for item in mapping.get("text_replacements", []) + mapping.get("literal_replacements", []):
         search = item.get("search")
         field = item.get("field")
@@ -765,12 +1170,67 @@ def apply_dap_mapping_file(doc, context):
             continue
 
         if field:
-            replacement = deep_get(context, field, "")
+            replacement = get_context_value(context, field, "")
 
         replace_text_everywhere(doc, search, replacement or "")
 
-    apply_docx_table_mappings(doc, context, mapping.get("table_mappings", []))
+
+def apply_cleanup_placeholders(doc, mapping):
+    for placeholder in mapping.get("cleanup_placeholders", []):
+        if placeholder and len(str(placeholder)) > 2:
+            replace_text_everywhere(doc, placeholder, "")
+
+
+def apply_dap_default_mappings(doc, context):
+    default_mappings = [
+        {"label": "Identifiant", "field": "dossier.identifiant"},
+        {"label": "Raison sociale", "field": "entreprise.raison_sociale"},
+        {"label": "Forme juridique", "field": "entreprise.forme_juridique"},
+        {"label": "Date de création", "field": "entreprise.date_creation"},
+        {"label": "Secteur d’activité", "field": "entreprise.activite"},
+        {"label": "Capital social (MAD)", "field": "entreprise.capital_social_mad"},
+        {"label": "Registre de commerce", "field": "entreprise.rc"},
+        {"label": "Identifiant Commun de l'Entreprise", "field": "entreprise.ice"},
+        {"label": "CNSS", "field": "entreprise.cnss"},
+        {"label": "Adresse du siège social", "field": "entreprise.adresse_siege"},
+        {"label": "Dirigeant", "field": "dirigeant.nom"},
+        {"label": "Mobile (Cellulaire)", "field": "dirigeant.mobile"},
+        {"label": "Courrier électronique", "field": "dirigeant.email"},
+        {"label": "Objet du projet", "field": "projet.objet"},
+        {"label": "Ville/Région du Projet", "field": "projet.ville_region"},
+        {"label": "Effectif à embaucher", "field": "projet.effectif"},
+        {"label": "Partenaire financier", "field": "banque.nom"},
+        {"label": "Investissement total", "field": "projet.investissement_total"},
+    ]
+
+    for item in default_mappings:
+        value = get_context_value(context, item["field"], "")
+
+        if value not in ["", None, 0]:
+            fill_cell_next_to_label(doc, item["label"], value)
+
+
+def apply_dap_mapping_file(doc, context):
+    mapping_path = MAPPING_DIR / "mapping_dap_istitmar.json"
+
+    if not mapping_path.exists():
+        apply_dap_default_mappings(doc, context)
+        return
+
+    with open(mapping_path, "r", encoding="utf-8") as f:
+        mapping = json.load(f)
+
+    apply_scalar_text_replacements(doc, context, mapping)
+    apply_legacy_text_replacements(doc, context, mapping)
+    apply_legacy_label_mappings(doc, context, mapping)
+    apply_table_cell_mappings(doc, context, mapping)
+    apply_repeat_table_mappings(doc, context, mapping)
+    apply_single_row_table_mappings(doc, context, mapping)
+    apply_paragraph_mappings(doc, context, mapping)
+    apply_checkbox_mappings(doc, context, mapping)
+
     apply_dap_default_mappings(doc, context)
+    apply_cleanup_placeholders(doc, mapping)
 
 
 def render_dap_with_mapping(output_path, context):
@@ -780,7 +1240,6 @@ def render_dap_with_mapping(output_path, context):
         raise FileNotFoundError("Template Word introuvable : DAP_template.docx")
 
     safe_context = add_docx_defaults(copy.deepcopy(context))
-
     tmp_docx = Path(tempfile.gettempdir()) / f"tmp_dap_{uuid.uuid4()}.docx"
 
     doc_tpl = DocxTemplate(str(template_path))
@@ -790,6 +1249,66 @@ def render_dap_with_mapping(output_path, context):
     doc = Document(str(tmp_docx))
     apply_dap_mapping_file(doc, safe_context)
     doc.save(str(output_path))
+
+
+# =========================================================
+# WORD / DOCUMENTS JURIDIQUES
+# =========================================================
+
+def apply_legal_doc_defaults(doc, context, template_name):
+    dossier = context.get("dossier", {})
+    entreprise = context.get("entreprise", {})
+    dirigeant = context.get("dirigeant", {})
+    banque = context.get("banque", {})
+
+    nom = dirigeant.get("nom", "")
+    qualite = dirigeant.get("qualite", dirigeant.get("fonction", ""))
+    cin = dirigeant.get("cin", "")
+    raison = entreprise.get("raison_sociale", "")
+    forme = entreprise.get("forme_juridique", "")
+    rc = entreprise.get("rc", "")
+    lieu = dossier.get("lieu_signature", "")
+    date = dossier.get("date_signature", "")
+
+    banque_nom = banque.get("nom", "")
+    banque_forme = banque.get("forme_juridique", "Société Anonyme")
+    banque_capital = banque.get("capital", "")
+    banque_siege = banque.get("siege", "")
+
+    for paragraph in iter_all_paragraphs(doc):
+        text = paragraph.text
+
+        if "Je soussigné(e)" in text and "agissant au nom" in text:
+            paragraph.text = (
+                f"Je soussigné(e) {nom} ({qualite}), "
+                f"agissant au nom et pour le compte de {raison} {forme} :"
+            )
+
+        elif "Je soussigné (prénom, nom)" in text:
+            paragraph.text = (
+                f"Je soussigné {nom} en sa qualité de {qualite}, "
+                f"signataire de la convention d’investissement avec MAROC PME, "
+                f"titulaire de la CIN N° {cin} et agissant au nom et pour le compte "
+                f"de la société {raison} {forme}, inscrite au registre du commerce N° {rc} ;"
+            )
+
+        elif "Autorise ma banque partenaire" in text:
+            paragraph.text = (
+                f"• Autorise ma banque partenaire, {banque_nom}, {banque_forme} "
+                f"au capital de {banque_capital} dirhams et dont le siège social est sis au {banque_siege}, "
+                f"à transférer à Maroc PME, dans le cadre du Programme GO SIYAHA – volet soutien à l’investissement, "
+                f"mon dossier de candidature, le dossier bancaire (rating, accord subordonné pour le prêt bancaire, "
+                f"et le schéma de financement bancaire retenu) et une copie du contrat de crédit signé qu’elle aura constitué ;"
+            )
+
+        elif "Objet" in text and "justificatifs déposés" in text:
+            paragraph.text = (
+                f"Objet : Déclaration sur l’honneur relative aux justificatifs déposés par la société {raison} "
+                f"pour sa candidature au programme Go SIYAHA – Volet soutien à l’investissement :"
+            )
+
+        elif "Fait à" in text and ("Le" in text or "le" in text or "………" in text):
+            paragraph.text = f"Fait à : {lieu}    Le : {date}"
 
 
 def render_docx(template_name, output_path, context):
@@ -803,9 +1322,14 @@ def render_docx(template_name, output_path, context):
         raise FileNotFoundError(f"Template Word introuvable : {template_name}")
 
     safe_context = add_docx_defaults(copy.deepcopy(context))
+    tmp_docx = Path(tempfile.gettempdir()) / f"tmp_docx_{uuid.uuid4()}.docx"
 
-    doc = DocxTemplate(str(template_path))
-    doc.render(safe_context, jinja_env=DOCX_JINJA_ENV)
+    doc_tpl = DocxTemplate(str(template_path))
+    doc_tpl.render(safe_context, jinja_env=DOCX_JINJA_ENV)
+    doc_tpl.save(str(tmp_docx))
+
+    doc = Document(str(tmp_docx))
+    apply_legal_doc_defaults(doc, safe_context, template_name)
     doc.save(str(output_path))
 
 
@@ -850,7 +1374,11 @@ async def fill(request: Request):
         payload = await request.json()
         data = payload.get("data", payload)
 
-        selected_template = payload.get("selected_template") or data.get("selected_template") or "dossier_complet"
+        selected_template = (
+            payload.get("selected_template")
+            or data.get("selected_template")
+            or "dossier_complet"
+        )
 
         aliases = {
             "demande_honneur": "declaration_honneur_justificatifs",
@@ -880,6 +1408,23 @@ async def fill(request: Request):
             "hypotheses_financieres": data.get("hypotheses_financieres", {}),
             "financement_expert": data.get("financement_expert", {}),
             "financement_checkbox": data.get("financement_checkbox", {}),
+            "dap": data.get("dap", {}),
+            "gamme_services": data.get("gamme_services", []),
+            "marche_cibles": data.get("marche_cibles", []),
+            "concurrents": data.get("concurrents", []),
+            "fournisseurs": data.get("fournisseurs", []),
+            "clients_creneaux": data.get("clients_creneaux", []),
+            "politique_prix": data.get("politique_prix", []),
+            "capacites_animation": data.get("capacites_animation", []),
+            "emplois_directs_profils": data.get("emplois_directs_profils", []),
+            "recettes_devises": data.get("recettes_devises", []),
+            "achats_devises": data.get("achats_devises", {}),
+            "ca_previsionnel_dap": data.get("ca_previsionnel_dap", {}),
+            "synthese_etude_marche": data.get("synthese_etude_marche", ""),
+            "strategie_approvisionnement": data.get("strategie_approvisionnement", {}),
+            "strategie_commerciale": data.get("strategie_commerciale", {}),
+            "facteurs_differenciation": data.get("facteurs_differenciation", ""),
+            "attractivite_touristique": data.get("attractivite_touristique", ""),
         }
 
         context = add_docx_defaults(context)
