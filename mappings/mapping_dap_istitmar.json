@@ -1,6 +1,6 @@
 {
   "mapping_name": "mapping_dap_istitmar26_animation",
-  "version": "1.0",
+  "version": "1.1",
   "source_template": "[GO SIYAHA] DAP ISTITMAR26 - MaTPME (Animation) _ V23022026(1).docx",
   "template_path_in_vercel": "templates/DAP_template.docx",
   "mapping_path_in_vercel": "mappings/mapping_dap_istitmar.json",
