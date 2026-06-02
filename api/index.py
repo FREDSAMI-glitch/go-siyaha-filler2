@@ -9,6 +9,7 @@ from docx import Document
 from docx.table import _Cell
 from docx.shared import Cm
 from docx.oxml.ns import qn
+from lxml import etree
 from datetime import date
 import tempfile
 import zipfile
@@ -18,6 +19,8 @@ import re
 import copy
 
 app = FastAPI()
+
+CODE_VERSION = "DAP_SDT_XML_AFTER_SAVE_V4_2026_06_02"
 
 API_DIR = Path(__file__).resolve().parent
 POSSIBLE_BASE_DIRS = [API_DIR, API_DIR.parent]
@@ -1889,6 +1892,218 @@ def apply_dap_mapping_file(doc, context):
     }
 
 
+
+# =========================================================
+# DAP POST-TRAITEMENT XML SDT - V4
+# =========================================================
+
+def force_value(value, default):
+    if value is None:
+        return default
+    if isinstance(value, str) and value.strip() == "":
+        return default
+    return value
+
+
+def get_dap_narrative_texts(context):
+    projet = context.get("projet", {}) if isinstance(context.get("projet"), dict) else {}
+    entreprise = context.get("entreprise", {}) if isinstance(context.get("entreprise"), dict) else {}
+
+    ville = force_value(projet.get("ville_region") or context.get("ville_region"), "Agadir, Souss Massa")
+    activite = force_value(
+        projet.get("activites_envisagees") or projet.get("objet") or projet.get("description") or context.get("activite"),
+        "animation touristique et loisirs"
+    )
+    societe = force_value(entreprise.get("raison_sociale"), "la société")
+
+    return {
+        "market": str(force_value(
+            context.get("synthese_etude_marche") or projet.get("synthese_etude_marche"),
+            f"Le projet s’inscrit dans un marché touristique régional en développement, porté par la croissance de la demande pour des expériences de loisirs, d’animation et de découverte. À {ville}, l’activité touristique bénéficie d’une fréquentation nationale et internationale soutenue, ainsi que d’une demande locale pour des offres structurées, sécurisées et accessibles. L’offre proposée par {societe} répond à un besoin d’activités complémentaires aux prestations d’hébergement, de restauration et de loisirs existantes. Le positionnement du projet repose sur la qualité de service, la proximité avec les clientèles touristiques, la diversification de l’expérience proposée et la capacité à générer une fréquentation régulière. L’adéquation entre l’offre et la demande est favorable, notamment grâce au développement du tourisme expérientiel, familial et de loisirs dans la destination."
+        )),
+        "supply": str(force_value(
+            context.get("strategie_approvisionnement") if isinstance(context.get("strategie_approvisionnement"), str) else None,
+            "L’approvisionnement du projet sera organisé autour de fournisseurs locaux et nationaux sélectionnés sur la base de la qualité, de la disponibilité, du respect des délais et de la compétitivité des prix. Les principaux achats concernent les équipements d’exploitation, les consommables, la maintenance, les prestations techniques et les services de support nécessaires au bon fonctionnement de l’activité. La société prévoit de formaliser ses relations avec les fournisseurs à travers des devis, bons de commande et conditions de règlement négociées. Cette organisation permettra de sécuriser les approvisionnements, de réduire les risques de rupture et de favoriser l’intégration locale."
+        )),
+        "commercial": str(force_value(
+            context.get("strategie_commerciale") if isinstance(context.get("strategie_commerciale"), str) else None,
+            "La stratégie commerciale du projet reposera sur une approche multicanale combinant la vente directe, les réservations en ligne, les partenariats avec les agences de voyages, les établissements touristiques, les opérateurs locaux et les prescripteurs de la destination. L’offre sera adressée aux touristes nationaux, touristes internationaux, familles, groupes, entreprises et clientèle locale. La politique tarifaire sera adaptée selon la saison, le volume, les groupes et les offres packagées afin d’optimiser le taux de remplissage et le chiffre d’affaires. La communication s’appuiera sur la visibilité digitale, les réseaux sociaux, les partenariats touristiques et le bouche-à-oreille."
+        )),
+        "differentation": str(force_value(
+            context.get("facteurs_differenciation") or projet.get("facteurs_differenciation"),
+            f"Les facteurs de différenciation du projet reposent sur une offre d’{activite} structurée, une expérience client encadrée, la qualité de l’accueil, la sécurité des prestations, la proximité avec les clientèles ciblées et l’adaptation de l’offre aux besoins des touristes et des familles. Le projet se distingue également par son ancrage régional, sa capacité à créer des partenariats avec les acteurs touristiques locaux et son potentiel de contribution à l’attractivité de la destination. Cette différenciation permettra de renforcer la compétitivité de l’entreprise face aux offres informelles ou peu structurées."
+        )),
+        "attractiveness": str(force_value(
+            context.get("attractivite_touristique") or projet.get("attractivite_touristique"),
+            f"Le projet contribuera à renforcer l’attractivité touristique de la destination en proposant une offre complémentaire d’animation, de loisirs et d’expérience client. Il permettra d’enrichir le parcours des visiteurs, d’augmenter les possibilités d’activités disponibles sur le territoire et d’améliorer la rétention touristique. Par son implantation à {ville}, le projet participera à la valorisation de l’écosystème local, à la création d’emplois directs et indirects et au développement d’une offre touristique plus diversifiée et mieux structurée."
+        )),
+    }
+
+
+def replace_paragraph_text_xml(p, new_text):
+    W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
+    W = "{" + W_NS + "}"
+
+    pPr = p.find(W + "pPr")
+    saved_pPr = None
+
+    if pPr is not None:
+        saved_pPr = etree.fromstring(etree.tostring(pPr))
+
+    for child in list(p):
+        p.remove(child)
+
+    if saved_pPr is not None:
+        p.append(saved_pPr)
+
+    r = etree.SubElement(p, W + "r")
+    t = etree.SubElement(r, W + "t")
+    t.set(XML_SPACE, "preserve")
+    t.text = str(new_text)
+
+
+def patch_dap_docx_xml_after_save(docx_path, context):
+    """
+    Corrige le DAP après sauvegarde Word.
+    Important : les grands paragraphes narratifs du DAP sont dans des w:sdt,
+    donc python-docx ne les modifie pas correctement. Cette fonction modifie word/document.xml.
+    """
+    docx_path = Path(docx_path)
+    tmp_path = docx_path.with_suffix(".patched.docx")
+
+    W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    W14_NS = "http://schemas.microsoft.com/office/word/2010/wordml"
+    W = "{" + W_NS + "}"
+    W14 = "{" + W14_NS + "}"
+    ns = {"w": W_NS, "w14": W14_NS}
+
+    narratives = get_dap_narrative_texts(context)
+
+    rules = [
+        ("Synthétiser l’étude de marché réalisée", narratives["market"]),
+        ("Décrire brièvement les principales contraintes liées aux fournisseurs", narratives["supply"]),
+        ("Décrire brièvement la stratégie commerciale", narratives["commercial"]),
+        ("Décrire brièvement les facteurs de différenciation", narratives["differentation"]),
+        ("Décrire succinctement l’attractivité touristique estimée", narratives["attractiveness"]),
+    ]
+
+    def normalized(s):
+        s = str(s or "").lower().replace("\xa0", " ")
+        s = s.replace("’", "'").replace("œ", "oe")
+        s = re.sub(r"\s+", " ", s)
+        return s.strip()
+
+    def p_text(p):
+        return "".join(t.text or "" for t in p.findall(".//" + W + "t"))
+
+    def bool_fin(paths):
+        for path in paths:
+            v = get_context_value(context, path, None)
+            if v not in [None, "", [], {}]:
+                return to_number(v) > 0 or str(v).strip() in ["☑", "true", "True", "1", "oui", "Oui"]
+        return False
+
+    financing = {
+        "Autofinancement": bool_fin([
+            "financement_expert.fonds_propres_kmad",
+            "financement_expert.fonds_propres_mad",
+            "financement_pi.fonds_propres_kmad",
+            "projet.mode_financement.fonds_propres",
+            "projet.mode_financement.autofinancement",
+        ]),
+        "CMT": bool_fin([
+            "financement_expert.credit_bancaire_kmad",
+            "financement_expert.credit_bancaire_mad",
+            "financement_pi.credit_bancaire_kmad",
+            "projet.mode_financement.credit_bancaire",
+            "projet.mode_financement.cmt",
+        ]),
+        "Financement participatif": bool_fin([
+            "financement_expert.financement_participatif_kmad",
+            "financement_expert.financement_participatif_mad",
+            "projet.mode_financement.financement_participatif",
+        ]),
+        "Crédit fournisseur": bool_fin([
+            "financement_expert.credit_fournisseur_kmad",
+            "financement_expert.credit_fournisseur_mad",
+            "projet.mode_financement.credit_fournisseur",
+        ]),
+        "Leasing": bool_fin([
+            "financement_expert.leasing_kmad",
+            "financement_expert.leasing_mad",
+            "projet.mode_financement.leasing",
+        ]),
+    }
+
+    patched = {
+        "narrative_replacements": 0,
+        "checkbox_replacements": 0,
+    }
+
+    with zipfile.ZipFile(docx_path, "r") as zin:
+        file_data = {name: zin.read(name) for name in zin.namelist()}
+
+    xml_bytes = file_data["word/document.xml"]
+    root_xml = etree.fromstring(xml_bytes)
+
+    # 1) Remplacement des paragraphes narratifs dans w:sdtContent.
+    for p in root_xml.xpath(".//w:p", namespaces=ns):
+        text = p_text(p)
+        norm_text = normalized(text)
+
+        if not norm_text:
+            continue
+
+        for needle, replacement in rules:
+            if normalized(needle) in norm_text:
+                replace_paragraph_text_xml(p, replacement)
+                patched["narrative_replacements"] += 1
+
+                # enlever showingPlcHdr dans le content control parent
+                for sdt in p.xpath("ancestor::w:sdt[1]", namespaces=ns):
+                    for hdr in sdt.xpath(".//w:showingPlcHdr", namespaces=ns):
+                        parent = hdr.getparent()
+                        if parent is not None:
+                            parent.remove(hdr)
+                break
+
+    # 2) Correction des checkboxes visibles et de l'état Word.
+    for p in root_xml.xpath(".//w:p", namespaces=ns):
+        text = p_text(p)
+
+        for label, checked in financing.items():
+            if label in text:
+                symbol = "☑" if checked else "☐"
+
+                for chk in p.xpath(".//w14:checked", namespaces=ns):
+                    chk.set(W14 + "val", "1" if checked else "0")
+                    chk.set(W14 + "checked", "1" if checked else "0")
+
+                changed = False
+                for t in p.findall(".//" + W + "t"):
+                    if t.text in ["☐", "☑", "□"]:
+                        t.text = symbol
+                        changed = True
+
+                if changed:
+                    patched["checkbox_replacements"] += 1
+
+    file_data["word/document.xml"] = etree.tostring(
+        root_xml,
+        xml_declaration=True,
+        encoding="UTF-8",
+        standalone=True
+    )
+
+    with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for name, data in file_data.items():
+            zout.writestr(name, data)
+
+    tmp_path.replace(docx_path)
+    return patched
+
+
 def render_dap_docx(output_path, context):
     template_path = find_file("DAP_template.docx")
 
@@ -1905,6 +2120,14 @@ def render_dap_docx(output_path, context):
     doc = Document(str(tmp_docx))
     info = apply_dap_mapping_file(doc, safe_context)
     doc.save(str(output_path))
+
+    try:
+        post_info = patch_dap_docx_xml_after_save(output_path, safe_context)
+        if isinstance(info, dict):
+            info["xml_postprocess"] = post_info
+    except Exception as e:
+        if isinstance(info, dict):
+            info["xml_postprocess_error"] = str(e)
 
     return info
 
@@ -2008,6 +2231,7 @@ def root():
     return {
         "status": "ok",
         "message": "GO SIYAHA filler API",
+        "code_version": CODE_VERSION,
         "base_dir": str(BASE_DIR),
         "templates_dir": str(TEMPLATE_DIR),
         "mappings_dir": str(MAPPING_DIR),
@@ -2018,6 +2242,7 @@ def root():
 def health():
     return {
         "status": "ok",
+        "code_version": CODE_VERSION,
         "base_dir": str(BASE_DIR),
         "templates": {
             "DAP_template.docx": find_file("DAP_template.docx") is not None,
