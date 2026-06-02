@@ -1,8 +1,0 @@
-fastapi
-uvicorn
-python-multipart
-docxtpl
-openpyxl
-python-docx
-jinja2
-lxml
